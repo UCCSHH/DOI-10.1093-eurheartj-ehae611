@@ -5,7 +5,7 @@
 
 > European Heart Journal, Volume 45, Issue 47, 14 December 2024, Pages 5002–5019, [https://doi.org/10.1093/eurheartj/ehae611](https://doi.org/10.1093/eurheartj/ehae611)
 
-![Graphical Abstract](CODE/images/EAST_SINUS_2024_GA.png) 
+![Graphical Abstract](CODE/images/EAST_SINUS_2024_GA_01.png) 
 
 ## Prerequisities
 
