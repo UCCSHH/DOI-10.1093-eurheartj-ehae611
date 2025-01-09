@@ -1,0 +1,807 @@
+---
+title: "Biomarkers predict sinus rhythm: EAST-AFNET 4"
+author:
+  - name: "UCCS"
+    affiliation: Universitäres Herz- und Gefäßzentrum UKE Hamburg, Klinik für Kardiologie <br> Universitätsklinikum Hamburg-Eppendorf
+format: docx
+editor: visual
+---
+
+# Biomarkers predict sinus rhythm: EAST-AFNET 4
+
+## load packages
+
+```{r imports, eval=T, echo=F, include=FALSE}
+# load libraries and data
+library(readr)
+library(mice)
+library(miceadds)
+library(mitools)
+library(survival)
+library(lme4)
+library(broom.mixed)
+library(magrittr)
+library(dplyr)
+library(forcats)
+library(haven)
+library(nricens)
+library(ggplot2)
+library(tableone)
+library(writexl)
+library(gt)
+library(pROC)
+library(caret)
+```
+
+## Create Folders and Sub-Folders
+
+We simply create sub-folders to store the results of our analysis.
+
+```{r setup, eval=T, echo=F, include=FALSE}
+# Define your base directory
+base_dir <- "."
+dirs <- c("../DATA", "../DATA/input", "../DATA/output",
+          "../DATA/output/BL", "../DATA/output/FU12", "../DATA/output/FU24", "../DATA/output/unimputed",
+          "../DATA/output/clinical_utility", "../DATA/output/validation_axafa", "../DATA/output/validation_bbctrust", "../DATA/output/validation_bbctrust/FU",
+          "../DATA/output/table_one", "../DATA/output/table_one/p_vals_ERC", "../DATA/output/table_one/p_vals_Sinus")
+
+# Create directories
+lapply(dirs, function(dir) {
+  if (!dir.exists(dir)) {
+    dir.create(dir, recursive = TRUE)
+  }
+})
+
+cat("Directories created successfully.")
+
+```
+
+# Main analysis
+
+## Main analysis -- biomarker based clusters
+
+### BL unadjusted
+
+```{r BL unadjusted, message=F, warning=F}
+model_main_effect <- with(imp_data, glmer(formula = as.formula(paste('heart_rhythm_BL==1 ~
+                                                                 PoLCA_cluster + 
+                                                                 + (1|cid)')),
+                                      family = binomial))
+pooled_main_effect <- pool(model_main_effect)
+summary_main_effect <- summary(pooled_main_effect, conf.int = TRUE, conf.level = 0.95)
+summary_main_effect_df = as.data.frame(summary_main_effect)
+summary_main_effect_df$OR <- exp(summary_main_effect_df$estimate)
+summary_main_effect_df$OR_lower <- exp(summary_main_effect_df$`2.5 %`)
+summary_main_effect_df$OR_upper <- exp(summary_main_effect_df$`97.5 %`)
+# Create a new column 'OR' with desired format
+summary_main_effect_df$`OR [95% CI]` <- paste(round(summary_main_effect_df$OR, digits = 3), 
+                          "[",
+                          round(summary_main_effect_df$OR_lower, digits = 3), 
+                          "-",
+                          round(summary_main_effect_df$OR_upper, digits = 3), 
+                          "]", 
+                          sep = " ")
+# Round p.value column and handle values less than 0.001
+summary_main_effect_df$P <- ifelse(summary_main_effect_df$p.value < 0.001, '< 0.001', round(summary_main_effect_df$p.value, digits = 3))
+write.csv(summary_main_effect_df[, c('term', 'OR [95% CI]', 'P')], paste("../DATA/output/BL/Sinus_BL_bio_clust_unadj", ".csv", sep=''), row.names = FALSE)
+summary_main_effect_df
+```
+
+### BL adjusted
+
+Here we add further variables like gender, age and BMI to adjust our model for.
+
+```{r BL adjusted, message=F, warning=F}
+model_main_effect <- with(imp_data, glmer(formula = as.formula(
+  paste(
+    'heart_rhythm_BL==1 ~
+                                                                    i_gender_BL + +
+                                                                    i_age_calc + +
+                                                                    i_bmi + +
+                                                                    i_rr_dia + +
+                                                                    i_af_type + +
+                                                                    i_lvef_BL + +
+                                                                    PoLCA_cluster +
+                                                                    + (1|cid)'
+  )
+), family = binomial))
+pooled_main_effect <- pool(model_main_effect)
+summary_main_effect <- summary(pooled_main_effect, conf.int = TRUE, conf.level = 0.95)
+summary_main_effect_df = as.data.frame(summary_main_effect)
+summary_main_effect_df$OR <- exp(summary_main_effect_df$estimate)
+summary_main_effect_df$OR_lower <- exp(summary_main_effect_df$`2.5 %`)
+summary_main_effect_df$OR_upper <- exp(summary_main_effect_df$`97.5 %`)
+summary_main_effect_df$`OR [95% CI]` <- paste(
+  round(summary_main_effect_df$OR, digits = 3),
+  "[",
+  round(summary_main_effect_df$OR_lower, digits = 3),
+  "-",
+  round(summary_main_effect_df$OR_upper, digits = 3),
+  "]",
+  sep = " "
+)
+# Round p.value column and handle values less than 0.001
+summary_main_effect_df$P <- ifelse(summary_main_effect_df$p.value < 0.001,
+                          '< 0.001',
+                          round(summary_main_effect_df$p.value, digits = 3))
+write.csv(
+  summary_main_effect_df[, c('term', 'OR [95% CI]', 'P')],
+  paste("../DATA/output/BL/Sinus_BL_bio_clust_adj", ".csv", sep = ''),
+  row.names = FALSE
+)
+summary_main_effect_df
+```
+
+### FU12 & FU24 unadjusted and adjusted
+
+We use the same models as above but change the dependent variable from <heart_rhythm_BL> to <heart_rhythm_12> or respectively <heart_rhythm_24> and store the results in the corresponding folders
+
+
+## Main analysis -- single biomarkers - with interaction at FU12 and FU24
+
+### BL
+
+We use the same models as we did above for the clusters but use a single biomolecule instead of the biomolecule based cluster as independent variable. In order to make this efficient we wrap the model inside a for-loop where we iterate over all 14 biomolecules that we prviously defined in q markdown file 01_Imputation_FeatureEngineerung.qmd.
+
+```{r biomarkers BL unadjusted, message=F, warning=F}
+# make the regression for the each biomarker at a time
+anova_p_vals <- list()
+# Initialize counter
+iteration <- 0
+# Initialize flag variable
+  iteration <- iteration + 1  # Increment counter
+  model_main_effect <- with(imp_data, glmer(formula = as.formula(
+    paste('heart_rhythm_BL==1 ~ ', i, '+', ' + (1 | cid)')
+  ), family = binomial))
+  pooled_main_effect <- pool(model_main_effect)
+  summary_main_effect <- summary(pooled_main_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_main_effect_df = as.data.frame(summary_main_effect)
+  summary_main_effect_df$OR <- round(exp(summary_main_effect_df$estimate), digits = 3)
+  summary_main_effect_df$OR_lower <- round(exp(summary_main_effect_df$`2.5 %`), digits = 3)
+  summary_main_effect_df$OR_upper <- round(exp(summary_main_effect_df$`97.5 %`), digits = 3)
+  summary_main_effect_df$`OR [95% CI]` <- paste(
+    round(summary_main_effect_df$OR, digits = 3),
+    "[",
+    round(summary_main_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_main_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_main_effect_df$P <- ifelse(summary_main_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_main_effect_df$p.value, digits = 3))
+  write.csv(summary_main_effect_df[, c('term', 'OR [95% CI]', 'P')],
+            paste("../DATA/output/BL/", i, "unadj.csv", sep = ''),
+            row.names = FALSE)
+  cat("Iteration:", iteration, "\n")
+```
+
+### BL - adjustiert
+
+same code as above adjusted for certain variables (same as for baseline model).
+
+### FU12 unadjusted - incl interaction
+
+```{r biomarkers FU12 unadjusted, message=F, warning=F}
+# make the regression for the each biomarker at a time
+anova_p_vals <- list()
+# Initialize counter
+iteration <- 0
+# Initialize flag variable
+warning_displayed <- FALSE
+for (i in  biomarkers_wins_log_std) {
+  if (!warning_displayed) {
+    # Display warning message
+    warning("This is a warning message.")
+    # Set flag to True to indicate that warning has been displayed
+    warning_displayed <- TRUE
+  }
+  iteration <- iteration + 1  # Increment counter
+  
+  model_main_effect <- with(imp_data, glmer(formula = as.formula(
+    paste(
+      'heart_rhythm_12==1 ~
+                                                                     heart_rhythm_BL + +
+                                                                     random_group +',
+      i,
+      '+',
+      ' + (1 | cid)'
+    )
+  ), family = binomial))
+  
+  pooled_main_effect <- pool(model_main_effect)
+  summary_main_effect <- summary(pooled_main_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_main_effect_df = as.data.frame(summary_main_effect)
+  summary_main_effect_df$OR <- round(exp(summary_main_effect_df$estimate), digits = 3)
+  summary_main_effect_df$OR_lower <- round(exp(summary_main_effect_df$`2.5 %`), digits = 3)
+  summary_main_effect_df$OR_upper <- round(exp(summary_main_effect_df$`97.5 %`), digits = 3)
+  # Create a new column 'OR' with desired format
+  summary_main_effect_df$`OR [95% CI]` <- paste(
+    round(summary_main_effect_df$OR, digits = 3),
+    "[",
+    round(summary_main_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_main_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_main_effect_df$P <- ifelse(summary_main_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_main_effect_df$p.value, digits = 3))
+  ###################################################################################################################
+  # now with interaction term
+  model_interaction_effect <- with(imp_data, glmer(formula = as.formula(
+    paste(
+      'heart_rhythm_12==1 ~
+                                                                     heart_rhythm_BL + +
+                                                                     random_group +',
+      i,
+      '+',
+      'random_group *',
+      i,
+      '+',
+      '(1 | cid)'
+    )
+  ), family = binomial))
+  
+  pooled_interaction_effect <- pool(model_interaction_effect)
+  summary_interaction_effect <- summary(pooled_interaction_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_interaction_effect_df = as.data.frame(summary_interaction_effect)
+  summary_interaction_effect_df$OR <- round(exp(summary_interaction_effect_df$estimate), digits = 3)
+  summary_interaction_effect_df$OR_lower <- round(exp(summary_interaction_effect_df$`2.5 %`), digits = 3)
+  summary_interaction_effect_df$OR_upper <- round(exp(summary_interaction_effect_df$`97.5 %`), digits = 3)
+  # Create a new column 'OR' with desired format
+  summary_interaction_effect_df$`OR [95% CI]` <- paste(
+    round(summary_interaction_effect_df$OR, digits = 3),
+    "[",
+    round(summary_interaction_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_interaction_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_interaction_effect_df$P <- ifelse(summary_interaction_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_interaction_effect_df$p.value, digits = 3))
+  ###################################################################################################################
+  # now with interaction term - contrast-interaction
+  model_contrast_interaction_effect <- with(imp_data, glmer(formula = as.formula(
+    paste(
+      'heart_rhythm_12==1 ~
+                                                                     heart_rhythm_BL + +
+                                                                     random_group_ref_ERC +',
+      i,
+      '+',
+      'random_group_ref_ERC *',
+      i,
+      '+',
+      '(1 | cid)'
+    )
+  ), family = binomial))
+  
+  pooled_contrast_interaction_effect <- pool(model_contrast_interaction_effect)
+  summary_contrast_interaction_effect <- summary(pooled_contrast_interaction_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_contrast_interaction_effect_df = as.data.frame(summary_contrast_interaction_effect)
+  summary_contrast_interaction_effect_df$OR <- round(exp(summary_contrast_interaction_effect_df$estimate), digits = 3)
+  summary_contrast_interaction_effect_df$OR_lower <- round(exp(summary_contrast_interaction_effect_df$`2.5 %`), digits = 3)
+  summary_contrast_interaction_effect_df$OR_upper <- round(exp(summary_contrast_interaction_effect_df$`97.5 %`), digits = 3)
+  # Create a new column 'OR' with desired format
+  summary_contrast_interaction_effect_df$`OR [95% CI]` <- paste(
+    round(summary_contrast_interaction_effect_df$OR, digits = 3),
+    "[",
+    round(summary_contrast_interaction_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_contrast_interaction_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_contrast_interaction_effect_df$P <- ifelse(summary_contrast_interaction_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_contrast_interaction_effect_df$p.value, digits = 3))
+  ###################################################################################################################
+  #compare both models
+  anova <- anova(model_main_effect, model_interaction_effect)
+  # anova
+  anova_table <- summary(anova)
+  ###################################################################################################################
+  write.csv(
+    summary_interaction_effect_df[, c('term', 'OR [95% CI]', 'P')],
+    paste("../DATA/output/FU12/", i, "_inter", "unadj.csv", sep = ''),
+    row.names = FALSE
+  )
+  write.csv(
+    summary_contrast_interaction_effect_df[, c('term', 'OR [95% CI]', 'P')],
+    paste("../DATA/output/FU12/", i, "_inter_ERC", "unadj.csv", sep = ''),
+    row.names = FALSE
+  )
+  
+  write.csv(summary_main_effect_df[, c('term', 'OR [95% CI]', 'P')],
+            paste("../DATA/output/FU12/", i, "unadj.csv", sep = ''),
+            row.names = FALSE)
+  
+  cat("Iteration:", iteration, "\n")
+  
+  anova_p_vals <- c(anova_p_vals, anova_table$comparisons$p.value)
+}
+anova_df <- data.frame(p_value = unlist(anova_p_vals))
+# Save as CSV
+write.csv(anova_df, "../DATA/output/FU12/ANOVA_unadj.csv", row.names = FALSE)
+```
+
+### FU12 adjusted - incl interaction
+
+```{r biomarkers FU12 adjusted, message=F, warning=F}
+# make the regression for the each biomarker at a time
+anova_p_vals <- list()
+# Initialize counter
+iteration <- 0
+# Initialize flag variable
+warning_displayed <- FALSE
+for (i in  biomarkers_wins_log_std) {
+  iteration <- iteration + 1  # Increment counter
+  model_main_effect <- with(imp_data, glmer(formula = as.formula(
+    paste(
+      'heart_rhythm_12==1 ~
+                                                                     heart_rhythm_BL + +
+                                                                     random_group + +
+                                                                     i_gender_BL + +
+                                                                     i_age_calc + +
+                                                                     i_bmi + +
+                                                                     i_rr_dia + +
+                                                                     i_af_type + +
+                                                                     i_lvef_BL +',
+      i,
+      '+',
+      ' + (1 | cid)'
+    )
+  ), family = binomial))
+  
+  pooled_main_effect <- pool(model_main_effect)
+  summary_main_effect <- summary(pooled_main_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_main_effect_df = as.data.frame(summary_main_effect)
+  summary_main_effect_df$OR <- round(exp(summary_main_effect_df$estimate), digits = 3)
+  summary_main_effect_df$OR_lower <- round(exp(summary_main_effect_df$`2.5 %`), digits = 3)
+  summary_main_effect_df$OR_upper <- round(exp(summary_main_effect_df$`97.5 %`), digits = 3)
+  # Create a new column 'OR' with desired format
+  summary_main_effect_df$`OR [95% CI]` <- paste(
+    round(summary_main_effect_df$OR, digits = 3),
+    "[",
+    round(summary_main_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_main_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_main_effect_df$P <- ifelse(summary_main_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_main_effect_df$p.value, digits = 3))
+  ###################################################################################################################
+  # now with interaction term
+  model_interaction_effect <- with(imp_data, glmer(formula = as.formula(
+    paste(
+      'heart_rhythm_12==1 ~
+                                                                     heart_rhythm_BL + +
+                                                                     random_group + +
+                                                                     i_gender_BL + +
+                                                                     i_age_calc + +
+                                                                     i_bmi + +
+                                                                     i_rr_dia + +
+                                                                     i_af_type + +
+                                                                     i_lvef_BL +',
+      i,
+      '+',
+      'random_group *',
+      i,
+      '+',
+      '(1 | cid)'
+    )
+  ), family = binomial))
+  
+  pooled_interaction_effect <- pool(model_interaction_effect)
+  summary_interaction_effect <- summary(pooled_interaction_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_interaction_effect_df = as.data.frame(summary_interaction_effect)
+  summary_interaction_effect_df$OR <- round(exp(summary_interaction_effect_df$estimate), digits = 3)
+  summary_interaction_effect_df$OR_lower <- round(exp(summary_interaction_effect_df$`2.5 %`), digits = 3)
+  summary_interaction_effect_df$OR_upper <- round(exp(summary_interaction_effect_df$`97.5 %`), digits = 3)
+  # Create a new column 'OR' with desired format
+  summary_interaction_effect_df$`OR [95% CI]` <- paste(
+    round(summary_interaction_effect_df$OR, digits = 3),
+    "[",
+    round(summary_interaction_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_interaction_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_interaction_effect_df$P <- ifelse(summary_interaction_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_interaction_effect_df$p.value, digits = 3))
+  ###################################################################################################################
+  # now with interaction term - contrast interaction
+  model_contrast_interaction_effect <- with(imp_data, glmer(formula = as.formula(
+    paste(
+      'heart_rhythm_12==1 ~
+                                                                     heart_rhythm_BL + +
+                                                                     random_group_ref_ERC + +
+                                                                     i_gender_BL + +
+                                                                     i_age_calc + +
+                                                                     i_bmi + +
+                                                                     i_rr_dia + +
+                                                                     i_af_type + +
+                                                                     i_lvef_BL +',
+      i,
+      '+',
+      'random_group_ref_ERC *',
+      i,
+      '+',
+      '(1 | cid)'
+    )
+  ), family = binomial))
+  
+  pooled_contrast_interaction_effect <- pool(model_contrast_interaction_effect)
+  summary_contrast_interaction_effect <- summary(pooled_contrast_interaction_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_contrast_interaction_effect_df = as.data.frame(summary_contrast_interaction_effect)
+  summary_contrast_interaction_effect_df$OR <- round(exp(summary_contrast_interaction_effect_df$estimate), digits = 3)
+  summary_contrast_interaction_effect_df$OR_lower <- round(exp(summary_contrast_interaction_effect_df$`2.5 %`), digits = 3)
+  summary_contrast_interaction_effect_df$OR_upper <- round(exp(summary_contrast_interaction_effect_df$`97.5 %`), digits = 3)
+  # Create a new column 'OR' with desired format
+  summary_contrast_interaction_effect_df$`OR [95% CI]` <- paste(
+    round(summary_contrast_interaction_effect_df$OR, digits = 3),
+    "[",
+    round(summary_contrast_interaction_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_contrast_interaction_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_contrast_interaction_effect_df$P <- ifelse(summary_contrast_interaction_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_contrast_interaction_effect_df$p.value, digits = 3))
+  ###################################################################################################################
+  #compare both models
+  anova <- anova(model_main_effect, model_interaction_effect)
+  # anova
+  anova_table <- summary(anova)
+  # anova_df = as.data.frame(anova_table)
+  ###################################################################################################################
+  # if (anova_table$comparisons$p.value <= 0.05) {
+  write.csv(
+    summary_interaction_effect_df[, c('term', 'OR [95% CI]', 'P')],
+    paste("../DATA/output/FU12/FU12/", i, "_inter", "adj.csv", sep = ''),
+    row.names = FALSE
+  )
+  write.csv(
+    summary_contrast_interaction_effect_df[, c('term', 'OR [95% CI]', 'P')],
+    paste(
+      "../DATA/output/FU12/FU12/",
+      i,
+      "_inter_ERC",
+      "adj.csv",
+      sep = ''
+    ),
+    row.names = FALSE
+  )
+  write.csv(
+    summary_main_effect_df[, c('term', 'OR [95% CI]', 'P')],
+    paste("../DATA/output/FU12/FU12/", i, "adj.csv", sep = ''),
+    row.names = FALSE
+  )
+  cat("Iteration:", iteration, "\n")
+  anova_p_vals <- c(anova_p_vals, anova_table$comparisons$p.value)
+}
+anova_df <- data.frame(p_value = unlist(anova_p_vals))
+write.csv(anova_df,
+          "../DATA/output/FU12/FU12/ANOVA_adj.csv",
+          row.names = FALSE)
+```
+
+### FU 24 unadjusted incl interaction
+
+```{r biomarkers FU24 unadjusted, message=F, warning=F}
+# make the regression for the each biomarker at a time
+anova_p_vals <- list()
+# Initialize counter
+iteration <- 0
+# Initialize flag variable
+warning_displayed <- FALSE
+for (i in  biomarkers_wins_log_std) {
+  iteration <- iteration + 1  # Increment counter
+  model_main_effect <- with(imp_data, glmer(formula = as.formula(
+    paste(
+      'heart_rhythm_24==1 ~
+                                                                     heart_rhythm_BL + +
+                                                                     random_group +',
+      i,
+      '+',
+      ' + (1 | cid)'
+    )
+  ), family = binomial))
+  pooled_main_effect <- pool(model_main_effect)
+  summary_main_effect <- summary(pooled_main_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_main_effect_df = as.data.frame(summary_main_effect)
+  summary_main_effect_df$OR <- round(exp(summary_main_effect_df$estimate), digits = 3)
+  summary_main_effect_df$OR_lower <- round(exp(summary_main_effect_df$`2.5 %`), digits = 3)
+  summary_main_effect_df$OR_upper <- round(exp(summary_main_effect_df$`97.5 %`), digits = 3)
+  # Create a new column 'OR' with desired format
+  summary_main_effect_df$`OR [95% CI]` <- paste(
+    round(summary_main_effect_df$OR, digits = 3),
+    "[",
+    round(summary_main_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_main_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_main_effect_df$P <- ifelse(summary_main_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_main_effect_df$p.value, digits = 3))
+  ###################################################################################################################
+  # now with interaction term
+  model_interaction_effect <- with(imp_data, glmer(formula = as.formula(
+    paste(
+      'heart_rhythm_24==1 ~
+                                                                     heart_rhythm_BL + +
+                                                                     random_group +',
+      i,
+      '+',
+      'random_group *',
+      i,
+      '+',
+      '(1 | cid)'
+    )
+  ), family = binomial))
+  
+  pooled_interaction_effect <- pool(model_interaction_effect)
+  summary_interaction_effect <- summary(pooled_interaction_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_interaction_effect_df = as.data.frame(summary_interaction_effect)
+  summary_interaction_effect_df$OR <- round(exp(summary_interaction_effect_df$estimate), digits = 3)
+  summary_interaction_effect_df$OR_lower <- round(exp(summary_interaction_effect_df$`2.5 %`), digits = 3)
+  summary_interaction_effect_df$OR_upper <- round(exp(summary_interaction_effect_df$`97.5 %`), digits = 3)
+  # Create a new column 'OR' with desired format
+  summary_interaction_effect_df$`OR [95% CI]` <- paste(
+    round(summary_interaction_effect_df$OR, digits = 3),
+    "[",
+    round(summary_interaction_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_interaction_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_interaction_effect_df$P <- ifelse(summary_interaction_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_interaction_effect_df$p.value, digits = 3))
+  ###################################################################################################################
+  # now with interaction term - contrast interaction
+  model_contrast_interaction_effect <- with(imp_data, glmer(formula = as.formula(
+    paste(
+      'heart_rhythm_24==1 ~
+                                                                     heart_rhythm_BL + +
+                                                                     random_group_ref_ERC +',
+      i,
+      '+',
+      'random_group_ref_ERC *',
+      i,
+      '+',
+      '(1 | cid)'
+    )
+  ), family = binomial))
+  
+  pooled_contrast_interaction_effect <- pool(model_contrast_interaction_effect)
+  summary_contrast_interaction_effect <- summary(pooled_contrast_interaction_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_contrast_interaction_effect_df = as.data.frame(summary_contrast_interaction_effect)
+  summary_contrast_interaction_effect_df$OR <- round(exp(summary_contrast_interaction_effect_df$estimate), digits = 3)
+  summary_contrast_interaction_effect_df$OR_lower <- round(exp(summary_contrast_interaction_effect_df$`2.5 %`), digits = 3)
+  summary_contrast_interaction_effect_df$OR_upper <- round(exp(summary_contrast_interaction_effect_df$`97.5 %`), digits = 3)
+  # Create a new column 'OR' with desired format
+  summary_contrast_interaction_effect_df$`OR [95% CI]` <- paste(
+    round(summary_contrast_interaction_effect_df$OR, digits = 3),
+    "[",
+    round(summary_contrast_interaction_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_contrast_interaction_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_contrast_interaction_effect_df$P <- ifelse(summary_contrast_interaction_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_contrast_interaction_effect_df$p.value, digits = 3))
+  ###################################################################################################################
+  #compare both models
+  anova <- anova(model_main_effect, model_interaction_effect)
+  # anova
+  anova_table <- summary(anova)
+  ###################################################################################################################
+  write.csv(
+    summary_interaction_effect_df[, c('term', 'OR [95% CI]', 'P')],
+    paste("../DATA/output/FU24/", i, "_inter", "unadj.csv", sep = ''),
+    row.names = FALSE
+  )
+  write.csv(
+    summary_contrast_interaction_effect_df[, c('term', 'OR [95% CI]', 'P')],
+    paste("../DATA/output/FU24/", i, "_inter_ERC", "unadj.csv", sep = ''),
+    row.names = FALSE
+  )
+  write.csv(summary_main_effect_df[, c('term', 'OR [95% CI]', 'P')],
+            paste("../DATA/output/FU24/", i, "unadj.csv", sep = ''),
+            row.names = FALSE)
+  cat("Iteration:", iteration, "\n")
+  anova_p_vals <- c(anova_p_vals, anova_table$comparisons$p.value)
+}
+# Convert list to data frame
+anova_df <- data.frame(p_value = unlist(anova_p_vals))
+# Save as CSV
+write.csv(anova_df, "../DATA/output/FU24/ANOVA.csv", row.names = FALSE)
+```
+
+### FU 24 adjusted incl interaction
+
+```{r biomarkers FU24 adjusted, message=F, warning=F}
+# make the regression for the each biomarker at a time
+anova_p_vals <- list()
+# Initialize counter
+iteration <- 0
+# Initialize flag variable
+warning_displayed <- FALSE
+for (i in  biomarkers_wins_log_std) {
+  iteration <- iteration + 1  # Increment counter
+  model_main_effect <- with(imp_data, glmer(formula = as.formula(
+    paste(
+      'heart_rhythm_24==1 ~
+                                                                     heart_rhythm_BL + +
+                                                                     random_group + +
+                                                                     i_gender_BL + +
+                                                                     i_age_calc + +
+                                                                     i_bmi + +
+                                                                     i_rr_dia + +
+                                                                     i_af_type + +
+                                                                     i_lvef_BL +',
+      i,
+      '+',
+      ' + (1 | cid)'
+    )
+  ), family = binomial))
+  pooled_main_effect <- pool(model_main_effect)
+  summary_main_effect <- summary(pooled_main_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_main_effect_df = as.data.frame(summary_main_effect)
+  summary_main_effect_df$OR <- round(exp(summary_main_effect_df$estimate), digits = 3)
+  summary_main_effect_df$OR_lower <- round(exp(summary_main_effect_df$`2.5 %`), digits = 3)
+  summary_main_effect_df$OR_upper <- round(exp(summary_main_effect_df$`97.5 %`), digits = 3)
+  # Create a new column 'OR' with desired format
+  summary_main_effect_df$`OR [95% CI]` <- paste(
+    round(summary_main_effect_df$OR, digits = 3),
+    "[",
+    round(summary_main_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_main_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_main_effect_df$P <- ifelse(summary_main_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_main_effect_df$p.value, digits = 3))
+  ###################################################################################################################
+  # now with interaction term
+  model_interaction_effect <- with(imp_data, glmer(formula = as.formula(
+    paste(
+      'heart_rhythm_24==1 ~
+                                                                     heart_rhythm_BL + +
+                                                                     random_group + +
+                                                                     i_gender_BL + +
+                                                                     i_age_calc + +
+                                                                     i_bmi + +
+                                                                     i_rr_dia + +
+                                                                     i_af_type + +
+                                                                     i_lvef_BL +',
+      i,
+      '+',
+      'random_group *',
+      i,
+      '+',
+      '(1 | cid)'
+    )
+  ), family = binomial))
+  pooled_interaction_effect <- pool(model_interaction_effect)
+  summary_interaction_effect <- summary(pooled_interaction_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_interaction_effect_df = as.data.frame(summary_interaction_effect)
+  summary_interaction_effect_df$OR <- round(exp(summary_interaction_effect_df$estimate), digits = 3)
+  summary_interaction_effect_df$OR_lower <- round(exp(summary_interaction_effect_df$`2.5 %`), digits = 3)
+  summary_interaction_effect_df$OR_upper <- round(exp(summary_interaction_effect_df$`97.5 %`), digits = 3)
+  # Create a new column 'OR' with desired format
+  summary_interaction_effect_df$`OR [95% CI]` <- paste(
+    round(summary_interaction_effect_df$OR, digits = 3),
+    "[",
+    round(summary_interaction_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_interaction_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_interaction_effect_df$P <- ifelse(summary_interaction_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_interaction_effect_df$p.value, digits = 3))
+  ###################################################################################################################
+  # now with interaction term - contrast interaction
+  model_contrast_interaction_effect <- with(imp_data, glmer(formula = as.formula(
+    paste(
+      'heart_rhythm_24==1 ~
+                                                                     heart_rhythm_BL + +
+                                                                     random_group_ref_ERC + +
+                                                                     i_gender_BL + +
+                                                                     i_age_calc + +
+                                                                     i_bmi + +
+                                                                     i_rr_dia + +
+                                                                     i_af_type + +
+                                                                     i_lvef_BL +',
+      i,
+      '+',
+      'random_group_ref_ERC *',
+      i,
+      '+',
+      '(1 | cid)'
+    )
+  ), family = binomial))
+  
+  pooled_contrast_interaction_effect <- pool(model_contrast_interaction_effect)
+  summary_contrast_interaction_effect <- summary(pooled_contrast_interaction_effect, conf.int = TRUE, conf.level = 0.95)
+  summary_contrast_interaction_effect_df = as.data.frame(summary_contrast_interaction_effect)
+  summary_contrast_interaction_effect_df$OR <- round(exp(summary_contrast_interaction_effect_df$estimate), digits = 3)
+  summary_contrast_interaction_effect_df$OR_lower <- round(exp(summary_contrast_interaction_effect_df$`2.5 %`), digits = 3)
+  summary_contrast_interaction_effect_df$OR_upper <- round(exp(summary_contrast_interaction_effect_df$`97.5 %`), digits = 3)
+  # Create a new column 'OR' with desired format
+  summary_contrast_interaction_effect_df$`OR [95% CI]` <- paste(
+    round(summary_contrast_interaction_effect_df$OR, digits = 3),
+    "[",
+    round(summary_contrast_interaction_effect_df$OR_lower, digits = 3),
+    "-",
+    round(summary_contrast_interaction_effect_df$OR_upper, digits = 3),
+    "]",
+    sep = " "
+  )
+  # Round p.value column and handle values less than 0.001
+  summary_contrast_interaction_effect_df$P <- ifelse(summary_contrast_interaction_effect_df$p.value < 0.001,
+                            '< 0.001',
+                            round(summary_contrast_interaction_effect_df$p.value, digits = 3))
+  ###################################################################################################################
+  #compare both models
+  anova <- anova(model_main_effect, model_interaction_effect)
+  # anova
+  anova_table <- summary(anova)
+  ###################################################################################################################
+  if (anova_table$comparisons$p.value <= 0.05) {
+    write.csv(
+      summary_interaction_effect_df[, c('term', 'OR [95% CI]', 'P')],
+      paste("../DATA/output/FU24/", i, "_inter", "adj.csv", sep = ''),
+      row.names = FALSE
+    )
+    write.csv(
+      summary_contrast_interaction_effect_df[, c('term', 'OR [95% CI]', 'P')],
+      paste("../DATA/output/FU24/", i, "_inter_ERC", "adj.csv", sep = ''),
+      row.names = FALSE
+    )
+  }
+  else {
+    write.csv(summary_main_effect_df[, c('term', 'OR [95% CI]', 'P')],
+              paste("../DATA/output/FU24/", i, "adj.csv", sep = ''),
+              row.names = FALSE)
+  }
+  cat("Iteration:", iteration, "\n")
+  anova_p_vals <- c(anova_p_vals, anova_table$comparisons$p.value)
+}
+# Convert list to data frame
+anova_df <- data.frame(p_value = unlist(anova_p_vals))
+# Save as CSV
+write.csv(anova_df, "../DATA/output/FU24/ANOVA_adj.csv", row.names = FALSE)
+```

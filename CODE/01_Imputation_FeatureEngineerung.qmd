@@ -1,0 +1,486 @@
+---
+title: "Biomarkers predict sinus rhythm: EAST-AFNET 4"
+author:
+  - name: "UCCS"
+    affiliation: Universitäres Herz- und Gefäßzentrum UKE Hamburg, Klinik für Kardiologie <br> Universitätsklinikum Hamburg-Eppendorf
+format: docx
+editor: visual
+---
+
+# Biomarkers predict sinus rhythm: EAST-AFNET 4
+
+## load packages
+
+in this q markdown file we load the datasets, doing further basic data preprocessing like joining datastes and some feature engineering. Finally we create mids objects. These are the inputs for the further analysis done in the other q markdown files.
+
+```{r imports, eval=T, echo=F, include=FALSE}
+# load libraries and data
+library(readr)
+library(mice)
+library(miceadds)
+library(mitools)
+library(survival)
+library(lme4)
+library(broom.mixed)
+library(magrittr)
+library(dplyr)
+library(forcats)
+library(haven)
+library(nricens)
+library(ggplot2)
+library(tableone)
+library(writexl)
+library(gt)
+library(pROC)
+library(caret)
+```
+
+## load and prepare datasets
+
+```{r load and prepare datasets, message=F, warning=F}
+# Import MI data and create random_group, contrast-coded random group, and sex
+imp <- read_dta("../DATA/input/east_MI_data_04.dta") %>%
+  mutate(
+    random_group = case_when(i_random == 1 ~ "Early rhythm control", i_random == 2 ~ "Usual care") %>% as.factor() %>% relevel(ref = "Usual care"),
+    
+    sex = case_when(i_gender == 1 ~ "male", i_gender == 2 ~ "female") %>% as.factor() %>% relevel(ref = "female"),
+    
+    random_group_ref_ERC = case_when(i_random == 1 ~ "Early rhythm control", i_random == 2 ~ "Usual care") %>% as.factor() %>% relevel(ref = "Early rhythm control")
+  )
+
+# Import biomarker data and define the cluster as a factor with the correct reference level
+EAST_biomarker_cluster <- read.csv(
+  "../DATA/input/sinus_rhythm_xy_polca.csv",
+  sep = ',',
+  check.names = TRUE,
+  stringsAsFactors = TRUE
+) %>%
+  mutate(
+    PoLCA_cluster = as.factor(PoLCA_cluster) %>%
+      relevel(ref = "Low_risk_cluster") %>%
+      fct_relevel("Low_intermediate_risk_cluster", after = 1)
+  )
+
+# Extra vector for names of biomarkers; raw and transformed
+biomarkers <- c(
+  'IL6',
+  'NtproBNP',
+  'TnT',
+  'GDF15',
+  'CRP',
+  'DDimer',
+  'CA125',
+  'ANGPT2',
+  'BMP10',
+  'ESM1',
+  'FABP3',
+  'FGF23',
+  'IGFBP7',
+  'sCr'
+)
+biomarkers_wins_log_std <- paste0(biomarkers, '_wins_log_std')
+
+# Import clinical data and merge with biomarker data
+patient_characteristics_endpoints_b <- read.csv("../DATA/input/patient_characteristics_endpoints_b.csv") %>%
+  left_join(
+    EAST_biomarker_cluster %>%
+      select(
+        subjectnr,
+        PoLCA_cluster,
+        eGFR,
+        all_of(biomarkers),
+        all_of(biomarkers_wins_log_std)
+      ),
+    by = "subjectnr"
+  ) %>%
+  mutate(
+    Random_group = case_when(
+      i_random == 1 ~ "Early rhythm control",
+      i_random == 2 ~ "Usual care",
+      TRUE ~ NA_character_
+    ),
+    
+    Rhythm_at_baseline = case_when(
+      heart_rhythm_bl == 0 ~ "Others",
+      heart_rhythm_bl == 1 ~ "Sinus rhythm + Pacing"
+    ),
+    
+    Rhythm_at_12_months_follow_up = case_when(
+      heart_rhythm_fu12 == 0 ~ "Others",
+      heart_rhythm_fu12 == 1 ~ "Sinus rhythm + Pacing"
+    ),
+    
+    Rhythm_at_24_months_follow_up = case_when(
+      heart_rhythm_fu24 == 0 ~ "Others",
+      heart_rhythm_fu24 == 1 ~ "Sinus rhythm + Pacing"
+    )
+  )
+
+# Import baseline visit data and join it to the endpoint dataframe
+patient_chara_endpoints_visit_b <- read.csv("../DATA/input/patient_characteristics_endpoints_visit_data_b.csv") %>%
+  filter(visitname == "Baseline")
+
+patient_characteristics_endpoints_b <- patient_characteristics_endpoints_b %>%
+  left_join(
+    patient_chara_endpoints_visit_b %>%
+      select(
+        subjectnr,
+        i_age_calc,
+        i_gender,
+        i_bmi,
+        i_rr_dia,
+        i_i2a_stroke,
+        i_i2b_kidney_dis,
+        i_af_type,
+        i_random,
+        i_rr_sys,
+        i_tte_la,
+        i_i2b_dm,
+        i_copd,
+        i_hf_nyha,
+        i_lvef
+      ),
+    by = "subjectnr"
+  )
+
+# Join biomarker and clinical variables for models and define factor variables
+imp <- imp %>%
+  left_join(
+    EAST_biomarker_cluster %>%
+      select(
+        subjectnr,
+        PoLCA_cluster,
+        eGFR,
+        all_of(biomarkers),
+        all_of(biomarkers_wins_log_std)
+      ),
+    by = "subjectnr"
+  ) %>%
+  left_join(
+    patient_chara_endpoints_visit_b %>%
+      select(
+        subjectnr,
+        i_age_calc,
+        i_bmi,
+        i_i2b_dm,
+        i_hf_nyha,
+        i_rr_dia,
+        i_rr_sys,
+        i_tte_la
+      ),
+    by = "subjectnr"
+  ) %>%
+  mutate(
+    Cluster = as.factor(PoLCA_cluster) %>%
+      relevel(ref = "Low_risk_cluster") %>%
+      fct_relevel("Low_intermediate_risk_cluster", after = 1),
+    
+    i_af_type = as.factor(i_af_type) %>%
+      relevel(ref = "1")
+  )
+# Filter out participants with imputed baseline rhythm values and create subsets
+ids_drop <- c(120, 170, 814, 1895, 2401, 2414, 2707)
+
+imp_filtered <- imp %>%
+  filter(!subjectnr %in% ids_drop)
+
+imp_af_filtered <- imp_filtered %>%
+  filter(heart_rhythm_BL == 0)
+
+imp_sinus_filtered <- imp_filtered %>%
+  filter(heart_rhythm_BL == 1)
+
+imp_ERC_filtered <- imp_filtered %>%
+  filter(random_group == "Early rhythm control")
+
+imp_UC_filtered <- imp_filtered %>%
+  filter(random_group == "Usual care")
+# Adjust cluster variable for filtered datasets
+adjust_cluster <- function(df) {
+  df %>%
+    mutate(
+      cluster = as.factor(PoLCA_cluster) %>%
+        relevel(ref = "Low_risk_cluster") %>%
+        fct_relevel("Low_intermediate_risk_cluster", after = 1)
+    )
+}
+
+imp_af_filtered <- adjust_cluster(imp_af_filtered)
+imp_sinus_filtered <- adjust_cluster(imp_sinus_filtered)
+imp_UC_filtered <- adjust_cluster(imp_UC_filtered)
+imp_ERC_filtered <- adjust_cluster(imp_ERC_filtered)
+
+```
+
+## feature engineering - clinical utility
+
+```{r feature engineering, message=F, warning=F}
+# rename variable to work properly
+# create a copy of the unimputed dataset and filter it for available biomarkers
+filtered_bios_imp_unimp <- patient_characteristics_endpoints_b %>%
+  filter(if_all(all_of(biomarkers_wins_log_std), ~ !is.na(.)))
+# create a copy of the imputed dataset with only available biomarkers
+filtered_bios_imp <- imp %>%
+  filter(if_all(all_of(biomarkers_wins_log_std), ~ !is.na(.)))
+
+# feature engineering for clinical risk score and discretized biomarkers
+# Discretize columns based on given conditions and create new columns with meaningful level names
+filtered_bios_imp <- filtered_bios_imp %>%
+  mutate(
+    i_tte_la_BL_discrete = factor(
+      ifelse(i_tte_la_BL > 50, "Large", "Normal"),
+      levels = c("Normal", "Large")
+    ),
+    age_discrete = factor(ifelse(i_age_calc > 75, "Old", "Young"), levels = c("Young", "Old")),
+    AF_type_discrete = factor(
+      ifelse(
+        i_af_type %in% c('First episode', 'Paroxysmal'),
+        "Non-persistent",
+        "Persistent"
+      ),
+      levels = c("Non-persistent", "Persistent")
+    ),
+    NtproBNP_discrete = cut(
+      NtproBNP,
+      breaks = c(-Inf, 1000, 1500, Inf),
+      labels = c("Low", "Moderate", "High")
+    ),
+    BMP10_discrete = cut(
+      BMP10,
+      breaks = c(-Inf, 2, 2.5, Inf),
+      labels = c("Low", "Moderate", "High")
+    ),
+    ANGPT2_discrete = factor(ifelse(ANGPT2 < 3.5, "Low", "High"), levels = c("Low", "High"))
+  )
+# Create a new variable 'risk_score' based on the number of higher levels in the first three discretized variables
+filtered_bios_imp <- filtered_bios_imp %>%
+  mutate(
+    # Count the number of higher levels
+    risk_score =
+      (i_tte_la_BL_discrete == "Large") +
+      (age_discrete == "Old") +
+      (AF_type_discrete == "Persistent"),
+    # Assign risk classes based on the risk score
+    risk_class = case_when(
+      risk_score == 0 ~ "Low Risk",
+      risk_score == 1 ~ "Moderate Risk",
+      risk_score == 2 ~ "High Risk",
+      risk_score == 3 ~ "Very High Risk"
+    ),
+    risk_class2 = case_when(
+      risk_score == 0 ~ "Low Risk",
+      risk_score == 1 ~ "Low Risk",
+      risk_score == 2 ~ "High Risk",
+      risk_score == 3 ~ "High Risk"
+    )
+  )
+# Convert risk_class to a factor with ordered levels
+filtered_bios_imp$risk_class2 <- factor(filtered_bios_imp$risk_class2,
+                                        levels = c("Low Risk", "High Risk"))
+filtered_bios_imp$risk_class <- factor(
+  filtered_bios_imp$risk_class,
+  levels = c("Low Risk", "Moderate Risk", "High Risk", "Very High Risk")
+)
+# also for the unimputed dataset for the table
+# Discretize columns based on given conditions and create new columns with meaningful level names
+filtered_bios_imp_unimp <- filtered_bios_imp_unimp %>%
+  mutate(
+    i_tte_la_BL_discrete = factor(
+      ifelse(i_tte_la > 50, "Large", "Normal"),
+      levels = c("Normal", "Large")
+    ),
+    age_discrete = factor(ifelse(i_age_calc > 75, "Old", "Young"), levels = c("Young", "Old")),
+    AF_type_discrete = factor(
+      ifelse(
+        i_af_type %in% c('First episode', 'Paroxysmal'),
+        "Non-persistent",
+        "Persistent"
+      ),
+      levels = c("Non-persistent", "Persistent")
+    ),
+    NtproBNP_discrete = cut(
+      NtproBNP,
+      breaks = c(-Inf, 1000, 1500, Inf),
+      labels = c("Low", "Moderate", "High")
+    ),
+    BMP10_discrete = cut(
+      BMP10,
+      breaks = c(-Inf, 2, 2.5, Inf),
+      labels = c("Low", "Moderate", "High")
+    ),
+    ANGPT2_discrete = factor(ifelse(ANGPT2 < 3.5, "Low", "High"), levels = c("Low", "High"))
+  )
+# Create a new variable 'risk_score' based on the number of higher levels in the first three discretized variables
+filtered_bios_imp_unimp <- filtered_bios_imp_unimp %>%
+  mutate(
+    # Count the number of higher levels
+    risk_score =
+      (i_tte_la_BL_discrete == "Large") +
+      (age_discrete == "Old") +
+      (AF_type_discrete == "Persistent"),
+    # Assign risk classes based on the risk score
+    risk_class = case_when(
+      risk_score == 0 ~ "Low Risk",
+      risk_score == 1 ~ "Moderate Risk",
+      risk_score == 2 ~ "High Risk",
+      risk_score == 3 ~ "Very High Risk"
+    ),
+    risk_class2 = case_when(
+      risk_score == 0 ~ "Low Risk",
+      risk_score == 1 ~ "Low Risk",
+      risk_score == 2 ~ "High Risk",
+      risk_score == 3 ~ "High Risk"
+    ),
+    # Create new risk score variables based on combinations of the discretized variables
+    risk_score2_NTproBNP = as.factor((risk_class2 == "High Risk") + (NtproBNP_discrete == "High")),
+    risk_score2_BMP10 = as.factor((risk_class2 == "High Risk") + (BMP10_discrete == "High")),
+    risk_score2_ANGPT2 = as.factor((risk_class2 == "High Risk") + (ANGPT2_discrete == "High")),
+    risk_score2_NTproBNP_BMP10 = as.factor((risk_class2 == "High Risk") + (BMP10_discrete == "High") + (NtproBNP_discrete == "High")
+    ),
+    risk_score2_NTproBNP_ANGPT2 = as.factor((risk_class2 == "High Risk") + (ANGPT2_discrete == "High") + (NtproBNP_discrete == "High")
+    ),
+    risk_score2_BMP10_ANGPT2 = as.factor((risk_class2 == "High Risk") + (BMP10_discrete == "High") + (ANGPT2_discrete == "High")
+    ),
+    risk_score2_NTproBNP_BMP10_ANGPT2 = as.factor((risk_class2 == "High Risk") + (BMP10_discrete == "High") + (ANGPT2_discrete == "High") + (NtproBNP_discrete == "High")
+    ),
+    
+    `Age > 75 years and persistent AF` = ifelse(
+      and(age_discrete == 'Old', AF_type_discrete == 'Persistent'),
+      "yes",
+      "no"
+    ),
+    `Age > 75 years and persistent AF and LA size > 50` = ifelse(and(
+      age_discrete == 'Old',
+      and(
+        AF_type_discrete == 'Persistent',
+        i_tte_la_BL_discrete == 'Large'
+      )
+    ), "yes", "no"),
+    `NTproBNP or BMP10 elevated` = ifelse(
+      or(NtproBNP_discrete == 'High', BMP10_discrete == 'High'),
+      "yes",
+      "no"
+    ),
+    `NTproBNP or ANGPT2 elevated` = ifelse(
+      or(NtproBNP_discrete == 'High', ANGPT2_discrete == 'High'),
+      "yes",
+      "no"
+    ),
+    `BMP10 or ANGPT2 elevated` = ifelse(
+      or(ANGPT2_discrete == 'High', BMP10_discrete == 'High'),
+      "yes",
+      "no"
+    ),
+    `at least one of three biomarkers elevated` = ifelse(or(
+      NtproBNP_discrete == 'High',
+      or(ANGPT2_discrete == 'High', BMP10_discrete == 'High')
+    ), "yes", "no")
+  )
+# Convert risk_class to a factor with ordered levels
+filtered_bios_imp_unimp$risk_class2 <- factor(filtered_bios_imp_unimp$risk_class2,
+                                              levels = c("Low Risk", "High Risk"))
+filtered_bios_imp_unimp$risk_class <- factor(
+  filtered_bios_imp_unimp$risk_class,
+  levels = c("Low Risk", "Moderate Risk", "High Risk", "Very High Risk")
+)
+# create copies subsetted for AF/Sinus //ERC/UC
+filtered_bios_imp_unimp_af_filtered <- filtered_bios_imp_unimp %>%
+  filter(`heart_rhythm_bl` == 'Others')
+
+filtered_bios_imp_unimp_sinus_filtered <- filtered_bios_imp_unimp %>%
+  filter(`heart_rhythm_bl` == 'Sinus rhythm + Pacing')
+
+filtered_bios_imp_af_filtered <- filtered_bios_imp %>%
+  filter(`heart_rhythm_BL` == 0)
+
+filtered_bios_imp_sinus_filtered <- filtered_bios_imp %>%
+  filter(`heart_rhythm_BL` == 1)
+
+
+# prep for as.mids object
+imp$violation_date <- as.character(imp$violation_date)
+imp$visitdate <- as.character(imp$visitdate)
+imp$cid <- as.character(imp$cid)
+filtered_bios_imp_unimp <- filtered_bios_imp_unimp %>%
+  rename(i_random = i_random.x)
+```
+
+## create mids objects
+
+```{r make mids, message=F, warning=F}
+# create mids objects
+names(imp) <- ifelse(substring(names(imp), 1, 1) == "_", gsub("_", "", names(imp)), names(imp))
+imp_data <- as.mids(imp,
+                    where = NULL,
+                    .imp = "mim",
+                    .id = "subjectnr")
+# names needs to be renamed to work with mids
+names(filtered_bios_imp) <- ifelse(substring(names(filtered_bios_imp), 1, 1) ==
+                                     "_",
+                                   gsub("_", "", names(filtered_bios_imp)),
+                                   names(filtered_bios_imp))
+# create a mids object for the imputed and for available biomarkers filtered dataset
+filtered_bios_imp_data <- as.mids(filtered_bios_imp,
+                                  where = NULL,
+                                  .imp = "mim",
+                                  .id = "subjectnr")
+# also for af // sinus
+names(imp_af_filtered) <- ifelse(substring(names(imp_af_filtered), 1, 1) ==
+                                   "_",
+                                 gsub("_", "", names(imp_af_filtered)),
+                                 names(imp_af_filtered))
+imp_af_filtered_data <- as.mids(imp_af_filtered,
+                                where = NULL,
+                                .imp = "mim",
+                                .id = "subjectnr")
+names(imp_sinus_filtered) <- ifelse(substring(names(imp_sinus_filtered), 1, 1) ==
+                                      "_",
+                                    gsub("_", "", names(imp_sinus_filtered)),
+                                    names(imp_sinus_filtered))
+imp_sinus_filtered_data <- as.mids(imp_sinus_filtered,
+                                   where = NULL,
+                                   .imp = "mim",
+                                   .id = "subjectnr")
+# also for ERC // UC
+names(imp_UC_filtered) <- ifelse(substring(names(imp_UC_filtered), 1, 1) ==
+                                   "_",
+                                 gsub("_", "", names(imp_UC_filtered)),
+                                 names(imp_UC_filtered))
+imp_UC_filtered_data <- as.mids(imp_UC_filtered,
+                                where = NULL,
+                                .imp = "mim",
+                                .id = "subjectnr")
+names(imp_ERC_filtered) <- ifelse(substring(names(imp_ERC_filtered), 1, 1) ==
+                                    "_",
+                                  gsub("_", "", names(imp_ERC_filtered)),
+                                  names(imp_ERC_filtered))
+imp_ERC_filtered_data <- as.mids(imp_ERC_filtered,
+                                 where = NULL,
+                                 .imp = "mim",
+                                 .id = "subjectnr")
+
+# new 15 august 2024 -- also for AF/Sinus splitted ones
+names(filtered_bios_imp_af_filtered) <- ifelse(
+  substring(names(filtered_bios_imp_af_filtered), 1, 1) == "_",
+  gsub("_", "", names(filtered_bios_imp_af_filtered)),
+  names(filtered_bios_imp_af_filtered)
+)
+filtered_bios_imp_af_filtered_data <- as.mids(
+  filtered_bios_imp_af_filtered,
+  where = NULL,
+  .imp = "mim",
+  .id = "subjectnr"
+)
+names(filtered_bios_imp_sinus_filtered) <- ifelse(
+  substring(names(filtered_bios_imp_sinus_filtered), 1, 1) == "_",
+  gsub("_", "", names(filtered_bios_imp_sinus_filtered)),
+  names(filtered_bios_imp_sinus_filtered)
+)
+filtered_bios_imp_sinus_filtered_data <- as.mids(
+  filtered_bios_imp_sinus_filtered,
+  where = NULL,
+  .imp = "mim",
+  .id = "subjectnr"
+)
+
+```

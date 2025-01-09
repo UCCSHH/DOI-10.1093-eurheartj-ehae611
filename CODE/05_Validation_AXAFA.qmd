@@ -1,0 +1,283 @@
+---
+title: "Sinus Rhythm FU and Biomarkers - AXAFA AFNET cohort"
+author:
+  - name: "Katrin Borof"
+    email: k.borof@uke.de
+    affiliation: Universitäres Herz- und Gefäßzentrum UKE Hamburg, Klinik für Kardiologie <br> Universitätsklinikum Hamburg-Eppendorf
+
+date: " `r  invisible(Sys.setlocale('LC_TIME', 'English'))` `r  format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    number_section: true
+---
+
+```{r libraries and set up, include=F }
+knitr::opts_chunk$set(echo = F)
+Sys.setlocale("LC_TIME", "English")
+library(tidyverse)
+library(summarytools)
+library(gt)
+library(gtsummary)
+library(readxl)
+library(haven)
+```
+
+
+```{r load clinical data and manipulation  , message=F, warning=F  }
+results <- readRDS(file = "../DATA/input/AXAFA_data_clin_biomarker_joined.rds")
+
+## create variables with pretty names
+results <- results %>% 
+  mutate(
+    HR_baseline = case_when(
+      RHYTHM == "1" ~ "SR",
+      RHYTHM == "2" ~ "AF",
+      RHYTHM == "3" ~ "AF",
+      RHYTHM == "4" ~ "SR",
+      RHYTHM == "5" ~ "AF",
+      T ~ NA_character_
+    )
+    ,HR_FU = case_when(
+      FURHYTHM == "1" ~ "SR",
+      FURHYTHM == "2" ~ "AF",
+      FURHYTHM == "3" ~ "AF",
+      FURHYTHM == "4" ~ "SR",
+      FURHYTHM == "5" ~ "AF",
+      FURHYTHM == "8" ~"AF",
+      T ~ NA_character_
+    )
+    ,random_group = case_when(
+      TRTPN == 0 ~ "VKA",
+      TRTPN == 1 ~ "Apixaban",
+      T ~ NA_character_
+      
+    )
+    ,Sex = case_when(
+      SEX == 1 ~"Male",
+      SEX== 2 ~"Female",
+      T ~ NA_character_
+    )
+)
+biomarkers <- c("IL.6", "Pro.BNP_2", "TNThs", "GDF.15", "CREA_2", "CRP.HS", "D.DI_2","CA.125_2", "ANG2", "BMP10", "ESM1", "FBP3", "FGF23", "IGFBP7")
+biomarkers_win_log_s <- c("IL.6_win_log_s", "Pro.BNP_2_win_log_s", 
+"TNThs_win_log_s", "GDF.15_win_log_s", "CREA_2_win_log_s", "CRP.HS_win_log_s", 
+"D.DI_2_win_log_s", "CA.125_2_win_log_s", "ANG2_win_log_s", "BMP10_win_log_s", 
+"ESM1_win_log_s", "FBP3_win_log_s", "FGF23_win_log_s", "IGFBP7_win_log_s")
+```
+# Overview
+
+For this analysis the final modified intention-to-treat (mITT) population from AXAFA AFNET 5 cohort will be used (n = 633).
+
+Note: Joining of Biomarkers and clinical data was done with Age, Sex, Height, sys BP, dia BP. Three cases could not be matched and were then assigned by EHRA and censored time to death.
+
+```{r  , message=F, warning=F, results='asis' }
+results %>% select(random_group, AGE, Sex, BMI, HR_baseline, HR_FU, all_of(biomarkers)
+                   ) %>% 
+  tbl_summary(
+    by="random_group"
+   # type= list(BMP10 ~ 'continuous', IL.6 ~ 'continuous' )
+  ) %>% 
+  add_overall() %>% 
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Random group**") %>% 
+  modify_header(all_stat_cols() ~ "**{level}**, N = {n} ({style_percent(p)}%)")
+
+cat(" <br> ")
+
+results %>% select(HR_FU,AGE, Sex, BMI, HR_baseline, HR_FU, all_of(biomarkers)
+                   ) %>% 
+  tbl_summary(
+    by="HR_FU"
+   # type= list(BMP10 ~ 'continuous', IL.6 ~ 'continuous' )
+  ) %>% 
+  add_overall() %>% 
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Heart Rhythm at FU 3 month**") %>% 
+  modify_header(all_stat_cols() ~ "**{level}**, N = {n} ({style_percent(p)}%)")
+```
+
+
+Note: 
+
+SR - Sinus Rhythm + Pacing
+
+
+AF - Atrial fibrillation + Atrial flutter + Other
+
+# Analysis of Sinus Rhythm and biomarkers
+
+All biomarkers were winsorized at 0.99 quantile, log transformed and standardized. 
+
+Values of zero are set to the lowest available value above zero.
+
+Age was standardized.
+
+```{r Ana SR FU, eval=T, message=F, warning=F, results='asis'}
+## for loop for all biomarkers
+for (i in 1:NROW(biomarkers_win_log_s)) {
+  formu1 <- as.formula(paste(
+    "HR_FU == 'SR' ~ HR_baseline + ",
+    biomarkers_win_log_s[i],
+    " + random_group "
+  ))
+  formu2 <- as.formula(
+    paste(
+      "HR_FU == 'SR' ~ HR_baseline + ",
+      biomarkers_win_log_s[i],
+      " + random_group + Sex + scale(AGE) "
+    )
+  )
+  
+  fit1 <- glm(formu1 , data = results, family = binomial())# %>% summary()
+  fit2 <- glm(formu2 , data = results, family = binomial())# %>% summary()
+  
+  cat(
+    sjPlot::tab_model(
+      fit1,
+      fit2
+      ,
+      show.intercept = F,
+      show.obs = F,
+      show.r2 = F
+      ,
+      dv.labels = c("SR at FU", "SR at FU")
+      ,
+      title = paste(
+        "Logisitic regression model with outcome `Sinus Rhythm at 3 month FU` and `",
+        biomarkers[i],
+        "`",
+        sep = ""
+      )
+      ,
+      pred.labels = c(
+        "HR at BL: SR",
+        biomarkers[i],
+        "Random group: VKA",
+        "Sex: Male",
+        "Age in years"
+      )
+      ,
+      string.est = "OR per SD"
+    )$knitr,
+    "<br>  "
+  )
+  
+}
+```
+# Risk groups
+```{r, message=F, warning=F  }
+
+
+results <- results %>%
+  mutate(
+    age_discrete = factor(ifelse(AGE > 75, "Old", "Young"), levels = c("Young", "Old")),
+    AF_type_discrete = factor(
+      ifelse(AFTYPE %in% c('1'), "Non-persistent", "Persistent"),
+      levels = c("Non-persistent", "Persistent")
+    ),
+    NtproBNP_discrete = cut(
+      Pro.BNP_2,
+      breaks = c(-Inf, 1000, 2000, Inf),
+      labels = c("Low", "Moderate", "High")
+    ),
+    BMP10_discrete = cut(
+      BMP10,
+      breaks = c(-Inf, 2, 2.5, Inf),
+      labels = c("Low", "Moderate", "High")
+    ),
+    ANGPT2_discrete = factor(ifelse(ANG2 < 3.5, "Low", "High"), levels = c("Low", "High"))
+  )
+
+# Create a new variable 'risk_score' based on the number of higher levels in the first three discretized variables
+results <- results %>%
+  mutate(
+    # Count the number of higher levels
+    risk_score =
+      (age_discrete == "Old") +
+      (AF_type_discrete == "Persistent"),
+    
+    # Assign risk classes based on the risk score
+    risk_class = case_when(
+      risk_score == 0 ~ "Low Risk",
+      risk_score == 1 ~ "Moderate Risk",
+      risk_score == 2 ~ "High Risk",
+      risk_score == 3 ~ "Very High Risk"
+    )
+    ,
+    risk_class_2 = case_when(
+      risk_score == 0 ~ "Low Risk",
+      risk_score == 1 ~ "Moderate-High Risk",
+      risk_score == 2 ~ "Moderate-High Risk",
+      risk_score == 3 ~ "Very High Risk"
+    )
+  )
+
+# Convert risk_class to a factor with ordered levels
+results$risk_class <- factor(results$risk_class,
+                             levels = c("Low Risk", "Moderate Risk", "High Risk"))
+
+results <- results %>% mutate(
+  risk_all_3_bm = case_when(
+    NtproBNP_discrete == "High" |
+      BMP10_discrete == "High"  | ANGPT2_discrete == "High" ~ "High",
+    NtproBNP_discrete == "Low" &
+      BMP10_discrete == "Low"  & ANGPT2_discrete == "Low" ~ "Low",!is.na(NtproBNP_discrete)  &
+      !is.na(BMP10_discrete)  & !is.na(ANGPT2_discrete)  ~ "Other",
+    T ~ NA_character_
+  ) %>% as.factor() %>% relevel(ref = "Low")
+  
+  ,
+  risk_bm_NTproBNP_BMP10 = case_when(
+    NtproBNP_discrete == "High" | BMP10_discrete == "High" ~ "High",
+    NtproBNP_discrete == "Low" & BMP10_discrete == "Low"  ~ "Low",!is.na(NtproBNP_discrete) &
+      !is.na(BMP10_discrete) ~ "Other",
+    T ~ NA_character_
+  ) %>% as.factor() %>% relevel(ref = "Low")
+  
+  ,
+  risk_bm_NTproBNP_ANGPT2 = case_when(
+    NtproBNP_discrete == "High" | ANGPT2_discrete == "High" ~ "High",
+    NtproBNP_discrete == "Low" & ANGPT2_discrete == "Low"  ~ "Low",!is.na(NtproBNP_discrete) &
+      !is.na(ANGPT2_discrete) ~ "Other",
+    T ~ NA_character_
+  ) %>% as.factor() %>% relevel(ref = "Low")
+  
+  ,
+  risk_bm_BMP10_ANGPT2 = case_when(
+    BMP10_discrete == "High" | ANGPT2_discrete == "High" ~ "High",
+    BMP10_discrete == "Low" & ANGPT2_discrete == "Low"  ~ "Low",!is.na(BMP10_discrete) &
+      !is.na(ANGPT2_discrete) ~ "Other",
+    T ~ NA_character_
+  ) %>% as.factor() %>% relevel(ref = "Low")
+  
+)
+p_fin <- tbl_summary(
+  results %>% select(
+    HR_FU
+    ,
+    age_discrete ,
+    AF_type_discrete
+    ,
+    risk_class,
+    risk_class_2
+    ,
+    NtproBNP_discrete,
+    BMP10_discrete,
+    ANGPT2_discrete
+    ,
+    risk_bm_NTproBNP_BMP10,
+    risk_bm_NTproBNP_ANGPT2,
+    risk_bm_BMP10_ANGPT2
+    ,
+    risk_all_3_bm
+  )
+  ,
+  by = "HR_FU"
+) %>%
+  add_p() %>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Heart Rhythm at FU 3 month**")
+
+p_fin
+```
+# end

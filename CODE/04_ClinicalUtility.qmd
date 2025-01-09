@@ -1,0 +1,272 @@
+---
+title: "Biomarkers predict sinus rhythm: EAST-AFNET 4"
+author:
+  - name: "UCCS"
+    affiliation: Universitäres Herz- und Gefäßzentrum UKE Hamburg, Klinik für Kardiologie <br> Universitätsklinikum Hamburg-Eppendorf
+format: docx
+editor: visual
+---
+
+# Biomarkers predict sinus rhythm: EAST-AFNET 4
+
+## load packages
+
+in this q markdown file we load the datasets, doing further basic data preprocessing like joining datastes and some feature engineering. Finally we create mids objects. These are the inputs for the further analysis done in the other q markdown files.
+
+```{r imports, eval=T, echo=F, include=FALSE}
+# load libraries and data
+library(readr)
+library(mice)
+library(miceadds)
+library(mitools)
+library(survival)
+library(lme4)
+library(broom.mixed)
+library(magrittr)
+library(dplyr)
+library(forcats)
+library(haven)
+library(nricens)
+library(ggplot2)
+library(tableone)
+library(writexl)
+library(gt)
+library(pROC)
+library(caret)
+```
+
+### clinical utility score
+
+```{r, message=F, warning=F}
+# Recode `heart_rhythm_fu12` and handle missing values
+filtered_bios_imp_unimp <- filtered_bios_imp_unimp %>%
+  mutate(heart_rhythm_fu12 = case_when(
+    heart_rhythm_fu12 == 'Sinus rhythm + Pacing' ~ "Sinus",
+    heart_rhythm_fu12 == 'Others' ~ "AF",
+    TRUE ~ as.character(heart_rhythm_fu12)
+  ))
+# List of variable names
+discrete_columns <- c(
+  "i_tte_la_BL_discrete",
+  "age_discrete",
+  "AF_type_discrete",
+  "NtproBNP_discrete",
+  "BMP10_discrete",
+  "ANGPT2_discrete",
+  "risk_class",
+  "risk_class2",
+  "Age > 75 years and persistent AF",
+  "Age > 75 years and persistent AF and LA size > 50",
+  "NTproBNP or BMP10 elevated",
+  "NTproBNP or ANGPT2 elevated",
+  "BMP10 or ANGPT2 elevated",
+  "at least one of three biomarkers elevated"
+)
+
+selected_columns <- discrete_columns
+table1 <- CreateTableOne(vars = selected_columns, strata = "heart_rhythm_fu12", data = filtered_bios_imp_unimp, includeNA = TRUE)
+table1_matrix <- print(table1, printToggle = FALSE, showAllLevels = TRUE)
+# Add an index column to the data frame
+table1_matrix <- cbind(Index = rownames(table1_matrix), table1_matrix)
+# save excel table to disk
+write_xlsx(as.data.frame(table1_matrix), "../DATA/output/clinical_utility/clinical_risk_table.xlsx")
+# as.data.frame(table1_matrix)
+```
+
+
+# Sensitivity analysis Part II
+
+## Sensitivity Part II -- clinical utility vs biomarker risk ORs and p-values
+
+```{r}
+model_main_effect <- with(filtered_bios_imp_data, glmer(formula = as.formula(
+  paste(
+    'heart_rhythm_12==1 ~
+                                                                 risk_class +
+                                                                 NtproBNP_discrete +
+                                                                 BMP10_discrete +
+                                                                 ANGPT2_discrete +
+                                                                 + (1|cid)'
+  )
+), family = binomial))
+pooled_main_effect <- pool(model_main_effect)
+summary_main_effect <- summary(
+  pooled_main_effect,
+  conf.int = TRUE,
+  conf.level = 0.95,
+  exp = F
+)
+summary_main_effect_df = as.data.frame(summary_main_effect)
+summary_main_effect_df$OR <- round(exp(summary_main_effect_df$estimate), digits = 3)
+summary_main_effect_df$OR_lower <- round(exp(summary_main_effect_df$`2.5 %`), digits = 3)
+summary_main_effect_df$OR_upper <- round(exp(summary_main_effect_df$`97.5 %`), digits = 3)
+summary_main_effect_df$`OR [95% CI]` <- paste(
+  round(summary_main_effect_df$OR, digits = 3),
+  "[",
+  round(summary_main_effect_df$OR_lower, digits = 3),
+  "-",
+  round(summary_main_effect_df$OR_upper, digits = 3),
+  "]",
+  sep = " "
+)
+## Round p.value column and handle values less than 0.001
+summary_main_effect_df$P <- ifelse(summary_main_effect_df$p.value < 0.001,
+                          '< 0.001',
+                          round(summary_main_effect_df$p.value, digits = 3))
+write.csv(
+  summary_main_effect_df[, c('term', 'OR [95% CI]', 'P')],
+  paste(
+    "../DATA/output/clinical_utility/clincial_risk_ORs",
+    ".csv",
+    sep = ''
+  ),
+  row.names = FALSE
+)
+summary_main_effect_df
+```
+
+## Sensitivity Part II -- clincial utility vs biomarker | reclassification confusion matrices
+
+### construct clinical risk score and additional biomarker risk score | confusion matrix
+
+```{r}
+filtered_bios_imp_unimp <- filtered_bios_imp_unimp %>%
+  mutate(
+    # Dichotomize risk score variables into binary factors
+    risk_score2_NTproBNP = factor((risk_class2 == "High Risk") |
+                                    (NtproBNP_discrete == "High"),
+                                  levels = c(FALSE, TRUE)
+    ),
+    risk_score2_BMP10 = factor((risk_class2 == "High Risk") |
+                                 (BMP10_discrete == "High"),
+                               levels = c(FALSE, TRUE)
+    ),
+    risk_score2_ANGPT2 = factor((risk_class2 == "High Risk") |
+                                  (ANGPT2_discrete == "High"),
+                                levels = c(FALSE, TRUE)
+    ),
+    risk_score2_NTproBNP_BMP10 = factor((risk_class2 == "High Risk") |
+                                          (BMP10_discrete == "High") |
+                                          (NtproBNP_discrete == "High"),
+                                        levels = c(FALSE, TRUE)
+    ),
+    risk_score2_NTproBNP_ANGPT2 = factor((risk_class2 == "High Risk") |
+                                           (ANGPT2_discrete == "High") |
+                                           (NtproBNP_discrete == "High"),
+                                         levels = c(FALSE, TRUE)
+    ),
+    risk_score2_BMP10_ANGPT2 = factor((risk_class2 == "High Risk") |
+                                        (BMP10_discrete == "High") |
+                                        (ANGPT2_discrete == "High"),
+                                      levels = c(FALSE, TRUE)
+    ),
+    risk_score2_NTproBNP_BMP10_ANGPT2 = factor((risk_class2 == "High Risk") |
+                                                 (BMP10_discrete == "High") |
+                                                 (ANGPT2_discrete == "High") |
+                                                 (NtproBNP_discrete == "High"),
+                                               levels = c(FALSE, TRUE)
+    )
+  )
+```
+
+### get confusion matrices
+
+```{r}
+# Recode `heart_rhythm_fu12` and handle missing values
+filtered_bios_imp_unimp <- filtered_bios_imp_unimp %>%
+  mutate(
+    heart_rhythm_fu12 = case_when(
+      heart_rhythm_fu12 == 'Sinus rhythm + Pacing' ~ "Sinus",
+      heart_rhythm_fu12 == 'Others' ~ "AF",
+      TRUE ~ as.character(heart_rhythm_fu12)
+    )
+  )
+# List of variable names
+discrete_columns <- c(
+  "risk_class2",
+  "risk_score2_NTproBNP",
+  "risk_score2_BMP10",
+  "risk_score2_ANGPT2",
+  "risk_score2_NTproBNP_BMP10",
+  "risk_score2_BMP10_ANGPT2",
+  "risk_score2_NTproBNP_ANGPT2",
+  "risk_score2_NTproBNP_BMP10_ANGPT2"
+  
+)
+selected_columns <- discrete_columns
+table1 <- CreateTableOne(
+  vars = selected_columns,
+  strata = c("heart_rhythm_fu12"),
+  data = filtered_bios_imp_unimp,
+  includeNA = TRUE
+)
+table1_matrix <- print(table1, printToggle = FALSE, showAllLevels = TRUE)
+# Add an index column to the data frame
+table1_matrix <- cbind(Index = rownames(table1_matrix), table1_matrix)
+# save results to disk
+write_xlsx(
+  as.data.frame(table1_matrix),
+  "../DATA/output/clinical_utility/clinical_risk2_confusion_matrix_dicho.xlsx"
+)
+```
+
+### get the n reclassified
+
+```{r}
+# Function for calculating the reclassification for a biomarker model
+calculate_reclassification <- function(df, risk_score_col) {
+  df %>%
+    mutate(
+      reclassification = case_when(
+        risk_class2 == "Low Risk" &
+          !!sym(risk_score_col) == TRUE ~ "from low to high",
+        risk_class2 == "High Risk" &
+          !!sym(risk_score_col) == FALSE ~ "from high to low",
+        TRUE ~ NA_character_
+      )
+    )
+}
+# Applying the function to all biomarker models
+reclassified_NTproBNP <- calculate_reclassification(filtered_bios_imp_unimp, "risk_score2_NTproBNP")
+reclassified_BMP10 <- calculate_reclassification(filtered_bios_imp_unimp, "risk_score2_BMP10")
+reclassified_ANGPT2 <- calculate_reclassification(filtered_bios_imp_unimp, "risk_score2_ANGPT2")
+reclassified_NTproBNP_BMP10 <- calculate_reclassification(filtered_bios_imp_unimp, "risk_score2_NTproBNP_BMP10")
+reclassified_NTproBNP_ANGPT2 <- calculate_reclassification(filtered_bios_imp_unimp, "risk_score2_NTproBNP_ANGPT2")
+reclassified_BMP10_ANGPT2 <- calculate_reclassification(filtered_bios_imp_unimp, "risk_score2_BMP10_ANGPT2")
+reclassified_NTproBNP_BMP10_ANGPT2 <- calculate_reclassification(filtered_bios_imp_unimp,
+                                                                 "risk_score2_NTproBNP_BMP10_ANGPT2")
+
+# Counting the reclassifications for each model
+count_reclassifications <- function(reclassified_df) {
+  reclassified_df %>%
+    filter(!is.na(reclassification)) %>%
+    group_by(reclassification) %>%
+    summarize(count = n()) %>%
+    ungroup()
+}
+# Application to every model
+count_NTproBNP <- count_reclassifications(reclassified_NTproBNP)
+count_BMP10 <- count_reclassifications(reclassified_BMP10)
+count_ANGPT2 <- count_reclassifications(reclassified_ANGPT2)
+count_NTproBNP_BMP10 <- count_reclassifications(reclassified_NTproBNP_BMP10)
+count_NTproBNP_ANGPT2 <- count_reclassifications(reclassified_NTproBNP_ANGPT2)
+count_BMP10_ANGPT2 <- count_reclassifications(reclassified_BMP10_ANGPT2)
+count_NTproBNP_BMP10_ANGPT2 <- count_reclassifications(reclassified_NTproBNP_BMP10_ANGPT2)
+# Merging the results in a list
+reclassification_counts <- list(
+  NTproBNP = count_NTproBNP,
+  BMP10 = count_BMP10,
+  ANGPT2 = count_ANGPT2,
+  NTproBNP_BMP10 = count_NTproBNP_BMP10,
+  NTproBNP_ANGPT2 = count_NTproBNP_ANGPT2,
+  BMP10_ANGPT2 = count_BMP10_ANGPT2,
+  NTproBNP_BMP10_ANGPT2 = count_NTproBNP_BMP10_ANGPT2
+)
+# save results to disk
+write_xlsx(
+  as.data.frame(reclassification_counts),
+  "../DATA/output/clinical_utility/reclassification_countso.xlsx"
+)
+reclassification_counts
+
+```

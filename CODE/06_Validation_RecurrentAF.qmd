@@ -1,0 +1,710 @@
+---
+title: "EAST Analysis Biomarker - recurrent AF in the first 12/24 months of follow up"
+author:
+  - name: "Katrin Borof"
+    email: k.borof@uke.de
+    affiliation: Universitäres Herz- und Gefäßzentrum UKE Hamburg, Klinik für Kardiologie <br> Universitätsklinikum Hamburg-Eppendorf
+
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    number_section: true
+---
+
+
+```{r setup, eval=T, echo=F, include=FALSE}
+
+knitr::opts_chunk$set(echo = F)
+# load packages #
+library(ggplot2)
+library(tidyverse)
+library(summarytools)
+library(haven)
+library(tableone)
+library(lme4)
+library(lmerTest)
+library(knitr)
+library(kableExtra)
+library(gtools)
+library(VIM)
+library(jtools)
+library(lubridate)
+library(gtsummary)
+library(gt)
+library(broom.helpers)
+library(naniar)
+library(mice)
+library(survival)
+library(survminer)
+library(sjPlot)
+library(rms)
+library(RVenn)
+library(ranger)
+library(caret)
+library(ClustOfVar)
+library(broom.mixed)
+library(lsmeans)
+library(ordinal)
+library(mitml)
+library(car)
+```
+
+
+```{r import data sets }
+
+# Biomarkers raw, wins_log_std, and Cluster groups
+EAST_biomarker_cluster <- read.csv(
+  "../DATA/input/sinus_rhythm_xy_polca.csv",
+  sep = ',',
+  check.names = T,
+  stringsAsFactors = T
+)
+
+# extra vector for names of biomarkers; raw and transformed
+biomarkers <- c(
+  'IL6',
+  'NtproBNP',
+  'TnT',
+  'GDF15',
+  'CRP',
+  'DDimer',
+  'CA125',
+  'ANGPT2',
+  'BMP10',
+  'ESM1',
+  'FABP3',
+  'FGF23',
+  'IGFBP7',
+  'sCr'
+)
+
+biomarkers_wins_log_std <- c(
+  'IL6_wins_log_std',
+  'NtproBNP_wins_log_std',
+  'TnT_wins_log_std',
+  'GDF15_wins_log_std',
+  'CRP_wins_log_std',
+  'DDimer_wins_log_std',
+  'CA125_wins_log_std',
+  'ANGPT2_wins_log_std',
+  'BMP10_wins_log_std',
+  'ESM1_wins_log_std',
+  'FABP3_wins_log_std',
+  'FGF23_wins_log_std',
+  'IGFBP7_wins_log_std',
+  'sCr_wins_log_std'
+)
+
+# Import clinical data
+patient_characteristics_endpoints_b <- read_dta("../DATA/input/patient_characteristics_endpoints_b.dta")
+# ad clustering and Biomarkers
+patient_characteristics_endpoints_b <- patient_characteristics_endpoints_b %>%
+  left_join(EAST_biomarker_cluster %>% select(
+    subjectnr,
+    PoLCA_cluster,
+    all_of(biomarkers),
+    all_of(biomarkers_wins_log_std)
+  ),
+  by = "subjectnr")
+
+patient_chara_endpoints_visit_b <- read_dta("../DATA/input/patient_characteristics_endpoints_visit_data_b.dta") %>% filter(visitname ==
+                                                                                                                             "Baseline")
+# join baseline data to endpoint dataframe
+patient_characteristics_endpoints_b <- patient_characteristics_endpoints_b %>% left_join(
+  patient_chara_endpoints_visit_b %>%  select(subjectnr, i_age_calc, i_gender, i_bmi, i_rr_dia, i_af_type)
+  ,
+  by = "subjectnr"
+)
+
+# create new Random_group variable with pretty names
+patient_characteristics_endpoints_b <- patient_characteristics_endpoints_b %>% mutate(
+  Random_group = case_when(
+    i_random == 1 ~ "Early rhythm control",
+    i_random == 2 ~ "Usual care",
+    TRUE ~ NA_character_
+  )
+  ,
+  Rhythm_at_baseline = case_when(
+    heart_rhythm_bl == 0 ~ "Others",
+    heart_rhythm_bl == 1 ~ "Sinus rhythm + Pacing"
+  )
+  ,
+  Rhythm_at_12_months_follow_up	 = case_when(
+    heart_rhythm_fu12 == 0 ~ "Others",
+    heart_rhythm_fu12 == 1 ~ "Sinus rhythm + Pacing"
+  )
+  ,
+  Rhythm_at_24_months_follow_up	 = case_when(
+    heart_rhythm_fu24 == 0 ~ "Others",
+    heart_rhythm_fu24 == 1 ~ "Sinus rhythm + Pacing"
+  )
+  ,
+  Gender = case_when(i_gender == 1 ~ "Male", i_gender == 2 ~ "Female", TRUE ~ NA_character_)
+  ,
+  Diastolic_blood_pressure = i_rr_dia
+)
+
+```
+
+
+```{r}
+# Censor RecAf to 12/24 Months
+
+patient_characteristics_endpoints_b <- patient_characteristics_endpoints_b %>% mutate(
+  # RecAF 1 year
+  status_recurrent_af_1y = case_when(time_to_recurrent_af > 365 ~ 0, T ~ status_recurrent_af),
+  time_to_recurrent_af_1y = case_when(time_to_recurrent_af > 365 ~ 365, T ~ time_to_recurrent_af),
+  # RecAF 2 years
+  status_recurrent_af_2y = case_when(time_to_recurrent_af > 365 * 2 ~ 0, T ~ status_recurrent_af),
+  time_to_recurrent_af_2y = case_when(time_to_recurrent_af > 365 * 2 ~ 365, T ~ time_to_recurrent_af)
+  
+  ,
+  Status_AF_rec_1y = case_when(
+    status_recurrent_af_1y == 0 ~ "No",
+    status_recurrent_af_1y == 1 ~ "Yes"
+    
+  )
+  ,
+  Status_AF_rec_2y = case_when(
+    status_recurrent_af_2y == 0 ~ "No",
+    status_recurrent_af_2y == 1 ~ "Yes"
+  )
+)
+```
+
+# Case Numbers
+
+```{r deskriptiv  1 year, warning=F, message=F}
+## Biomarker cohort
+p_fin <- patient_characteristics_endpoints_b %>% filter(!is.na(NtproBNP)) %>%
+  select(
+    Status_AF_rec_1y,
+    Random_group,
+    i_age_calc,
+    Gender,
+    Diastolic_blood_pressure
+    ,
+    Rhythm_at_baseline,
+    Rhythm_at_12_months_follow_up
+    ,
+    i_af_type,
+    lvef_baseline
+    ,
+    all_of(biomarkers)
+  ) %>%
+  tbl_summary(by = "Status_AF_rec_1y"
+              , label = c(i_af_type ~ "AF_type")) %>%
+  modify_spanning_header(all_stat_cols() ~ "**Atrial fibrillation recurrence in the first 12 months of follow up**") %>%
+  modify_header(label = "**Variable**",
+                all_stat_cols() ~ "**{level}**, N = {n} ({style_percent(p)}%)") %>%
+  add_overall() %>%
+  modify_caption(
+    "**EAST Biomarker Cohort stratified by Atrial fibrillation recurrence in the first 12 months of follow up**"
+  )
+
+p_fin$table_body$label[p_fin$table_body$label == "IL6"] <- "Interleukin 6 [pg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "NtproBNP"] <- "NT-proBNP [pg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "TnT"] <- "Troponin T high sensitive [pg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "GDF15"] <- "Growth Differentiation Factor 15 [pg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "sCr"] <- "Creatinine enzymatic determination [μmol/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "CRP"] <- "Cardiac C Reactive Protein High Sensitive [mg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "DDimer"] <- "D-Dimer [μg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "CA125"] <- "Cancer Antigen 125 [U/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "BMP10"] <- "Bone morphogenetic protein 10 [ng/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "ESM1"] <- "Endothelial specific molecule 1 [ng/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "FABP3"] <- "Fatty acid binding protein 3 [ng/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "FGF23"] <- "Fibroblast growth factor 23 [pg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "IGFBP7"] <- "Insulin growth factor binding protein 7 [ng/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "ANGPT2"] <- "Angiopoietin 2 [ng/mL]"
+p_fin
+```
+
+
+```{r deskriptiv  2 year, warning=F, message=F}
+p_fin <- patient_characteristics_endpoints_b %>% filter(!is.na(NtproBNP)) %>%
+  select(
+    Status_AF_rec_2y,
+    Random_group,
+    i_age_calc,
+    Gender,
+    Diastolic_blood_pressure,
+    Rhythm_at_baseline,
+    Rhythm_at_12_months_follow_up
+    ,
+    i_af_type,
+    lvef_baseline,
+    all_of(biomarkers)
+  ) %>%
+  tbl_summary(by = "Status_AF_rec_2y"
+              , label = c(i_af_type ~ "AF_type")) %>%
+  modify_spanning_header(all_stat_cols() ~ "**Atrial fibrillation recurrence in the first 24 months of follow up**") %>%
+  modify_header(label = "**Variable**",
+                all_stat_cols() ~ "**{level}**, N = {n} ({style_percent(p)}%)") %>%
+  add_overall() %>%
+  modify_caption(
+    "**EAST Biomarker Cohort stratified by Atrial fibrillation recurrence in the first 24 months of follow up**"
+  )
+
+p_fin$table_body$label[p_fin$table_body$label == "IL6"] <- "Interleukin 6 [pg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "NtproBNP"] <- "NT-proBNP [pg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "TnT"] <- "Troponin T high sensitive [pg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "GDF15"] <- "Growth Differentiation Factor 15 [pg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "sCr"] <- "Creatinine enzymatic determination [μmol/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "CRP"] <- "Cardiac C Reactive Protein High Sensitive [mg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "DDimer"] <- "D-Dimer [μg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "CA125"] <- "Cancer Antigen 125 [U/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "BMP10"] <- "Bone morphogenetic protein 10 [ng/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "ESM1"] <- "Endothelial specific molecule 1 [ng/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "FABP3"] <- "Fatty acid binding protein 3 [ng/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "FGF23"] <- "Fibroblast growth factor 23 [pg/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "IGFBP7"] <- "Insulin growth factor binding protein 7 [ng/mL]"
+p_fin$table_body$label[p_fin$table_body$label == "ANGPT2"] <- "Angiopoietin 2 [ng/mL]"
+p_fin
+```
+
+# Cox Regression with Biomarkers
+
+## Outcome: RecAF at 12 months
+
+```{r Sinus Rhythm FU12 indivi BM, results='asis', eval=F, echo=F}
+# sex, age, BMI, diastolic blood pressure, AF pattern (first-episode, paroxysmal, persistent), left ventricular ejection fraction, rhythm at baseline, and randomized group (usual care or early rhythm control)
+
+patient_characteristics_endpoints_b$Random_group <- as.factor(patient_characteristics_endpoints_b$Random_group) %>% relevel(ref =
+                                                                                                                              "Usual care")
+patient_characteristics_endpoints_b$i_af_type <- as.character(patient_characteristics_endpoints_b$i_af_type)
+## for loop for all 14 biomarkers
+for (i in 1:NROW(bios_wins_log_std)) {
+  formula_main_effect <- as.formula(
+    paste(
+      "Surv(time_to_recurrent_af_1y, status_recurrent_af_1y) ~ ",
+      biomarkers_wins_log_std[i],
+      " + Random_group + Gender + scale(i_age_calc) + scale(i_bmi) + scale(Diastolic_blood_pressure) + Rhythm_at_baseline + i_af_type + scale(lvef_baseline) + frailty(cid) "
+    )
+  )
+  formula_biomarker_group_interaction <- as.formula(
+    paste(
+      "Surv(time_to_recurrent_af_1y, status_recurrent_af_1y) ~ ",
+      biomarkers_wins_log_std[i],
+      " * Random_group + Gender + scale(i_age_calc) + scale(i_bmi) + scale(Diastolic_blood_pressure)  + Rhythm_at_baseline + i_af_type + scale(lvef_baseline) + frailty(cid)  "
+    )
+  )
+  
+  fit1 <- coxph(formula_main_effect , data = patient_characteristics_endpoints_b)
+  fit2 <- coxph(formula_biomarker_group_interaction , data = patient_characteristics_endpoints_b)
+  
+  v <- cbind(
+    effect = round(exp(coef(fit1)), 2)
+    ,
+    CI = paste("[", round(exp(
+      confint(fit1, level = 0.95)
+    )[, 1], 2), ", ", round(exp(
+      confint(fit1, level = 0.95)
+    )[, 2], 2), "]")
+    ,
+    p_value = round(summary(fit1)$coefficients[-11, "p"], 3)
+  ) %>% as.data.frame()
+  v$p_value <- ifelse(as.numeric(as.character(v$p_value)) < 0.05,
+                      paste("**", v$p_value , "**", sep = ""),
+                      v$p_value)
+  v$p_value <- ifelse(v$p_value == "**0**", "**< 0.001**", v$p_value)
+  v$outcome <- c(
+    biomarkers_wins_log_std[i],
+    "Random_group: ERC",
+    "Gender: Male",
+    "Age",
+    "BMI",
+    "Diastolic blood pressure",
+    "Rhythm at baseline: SR",
+    "AF type: Paroxysmal (ref = first-episode)",
+    "AF type: Persistent (ref = first-episode)",
+    "LVEF"
+  )
+  
+  v3 <- cbind(
+    effect = round(exp(coef(fit2)), 2)
+    ,
+    CI = paste("[", round(exp(
+      confint(fit2, level = 0.95)
+    )[, 1], 2), ", ", round(exp(
+      confint(fit2, level = 0.95)
+    )[, 2], 2), "]")
+    ,
+    p_value = round(summary(fit2)$coefficients[-11, "p"], 3)
+  ) %>% as.data.frame()
+  
+  v3$p_value <- ifelse(as.numeric(as.character(v3$p_value)) < 0.05,
+                       paste("**", v3$p_value , "**", sep = ""),
+                       v3$p_value)
+  v3$p_value <- ifelse(v3$p_value == "**0**", "**< 0.001**", v3$p_value)
+  
+  v3$outcome <- c(
+    biomarkers_wins_log_std[i],
+    "Random_group: ERC",
+    "Gender: Male",
+    "Age",
+    "BMI",
+    "Diastolic blood pressure",
+    "Rhythm at baseline: SR",
+    "AF type: Paroxysmal (ref = first-episode)",
+    "AF type: Persistent (ref = first-episode)",
+    "LVEF",
+    paste(biomarkers_wins_log_std[i], ":Random group")
+  )
+  
+  v_all <- v %>% full_join(v3, by = "outcome")
+  
+  options(knitr.kable.NA = '-')
+  
+  k <- kable(
+    v_all[, c("outcome",
+              "effect.x",
+              "CI.x",
+              "p_value.x",
+              "effect.y",
+              "CI.y",
+              "p_value.y")],
+    format = "html",
+    booktabs = T,
+    escape = F,
+    row.names = F,
+    digits = 3
+    ,
+    caption =  paste(
+      "Cox regression model for outcome `Recurrent AF during first year` and `",
+      biomarkers[i],
+      "`",
+      sep = ""
+    )
+    ,
+    col.names = c(
+      "Variable",
+      "HR per SD",
+      "95%-CI",
+      "p value",
+      "HR per SD",
+      "95%-CI",
+      "p value"
+    )
+  ) %>%
+    kable_styling(full_width = F) %>%
+    footnote(general = c("Site was included as shared frailty term")) %>%
+    add_header_above(c(
+      "",
+      "Model 1" = 3,
+      "Model 2 - with interaction" = 3
+    )) %>%
+    column_spec (4, border_left = F, border_right = T)
+  
+  print(k)
+  
+}
+
+```
+
+
+```{r Sinus Rhythm FU12 indivi BM FUNC, results='asis'}
+
+# sex, age, BMI, diastolic blood pressure, AF pattern (first-episode, paroxysmal, persistent), left ventricular ejection fraction, rhythm at baseline, and randomized group (usual care or early rhythm control)
+
+patient_characteristics_endpoints_b$Random_group <- as.factor(patient_characteristics_endpoints_b$Random_group) %>% relevel(ref =
+                                                                                                                              "Usual care")
+patient_characteristics_endpoints_b$i_af_type <- as.character(patient_characteristics_endpoints_b$i_af_type)
+
+## function to call model regression
+plot_res <- function(i) {
+  formula_main_effect <- as.formula(
+    paste(
+      "Surv(time_to_recurrent_af_1y, status_recurrent_af_1y) ~ ",
+      biomarkers_wins_log_std[i],
+      " + Random_group + Gender + scale(i_age_calc) + scale(i_bmi) + scale(Diastolic_blood_pressure) + Rhythm_at_baseline + i_af_type + scale(lvef_baseline) + frailty(cid) "
+    )
+  )
+  formula_biomarker_group_interaction <- as.formula(
+    paste(
+      "Surv(time_to_recurrent_af_1y, status_recurrent_af_1y) ~ ",
+      biomarkers_wins_log_std[i],
+      " * Random_group + Gender + scale(i_age_calc) + scale(i_bmi) + scale(Diastolic_blood_pressure)  + Rhythm_at_baseline + i_af_type + scale(lvef_baseline) + frailty(cid)  "
+    )
+  )
+  
+  fit1 <- coxph(formula_main_effect , data = patient_characteristics_endpoints_b)
+  fit2 <- coxph(formula_biomarker_group_interaction , data = patient_characteristics_endpoints_b)
+  
+  v <- cbind(
+    effect = round(exp(coef(fit1)), 2)
+    ,
+    CI = paste("[", round(exp(
+      confint(fit1, level = 0.95)
+    )[, 1], 2), ", ", round(exp(
+      confint(fit1, level = 0.95)
+    )[, 2], 2), "]")
+    ,
+    p_value = round(summary(fit1)$coefficients[-11, "p"], 3)
+  ) %>% as.data.frame()
+  v$p_value <- ifelse(as.numeric(as.character(v$p_value)) < 0.05,
+                      paste("**", v$p_value , "**", sep = ""),
+                      v$p_value)
+  v$p_value <- ifelse(v$p_value == "**0**", "**< 0.001**", v$p_value)
+  v$outcome <- c(
+    biomarkers_wins_log_std[i],
+    "Random_group: ERC",
+    "Gender: Male",
+    "Age",
+    "BMI",
+    "Diastolic blood pressure",
+    "Rhythm at baseline: SR",
+    "AF type: Paroxysmal (ref = first-episode)",
+    "AF type: Persistent (ref = first-episode)",
+    "LVEF"
+  )
+  
+  v3 <- cbind(
+    effect = round(exp(coef(fit2)), 2)
+    ,
+    CI = paste("[", round(exp(
+      confint(fit2, level = 0.95)
+    )[, 1], 2), ", ", round(exp(
+      confint(fit2, level = 0.95)
+    )[, 2], 2), "]")
+    ,
+    p_value = round(summary(fit2)$coefficients[-11, "p"], 3)
+  ) %>% as.data.frame()
+  
+  v3$p_value <- ifelse(as.numeric(as.character(v3$p_value)) < 0.05,
+                       paste("**", v3$p_value , "**", sep = ""),
+                       v3$p_value)
+  v3$p_value <- ifelse(v3$p_value == "**0**", "**< 0.001**", v3$p_value)
+  
+  v3$outcome <- c(
+    biomarkers_wins_log_std[i],
+    "Random_group: ERC",
+    "Gender: Male",
+    "Age",
+    "BMI",
+    "Diastolic blood pressure",
+    "Rhythm at baseline: SR",
+    "AF type: Paroxysmal (ref = first-episode)",
+    "AF type: Persistent (ref = first-episode)",
+    "LVEF",
+    paste(biomarkers_wins_log_std[i], ":Random group")
+  )
+  
+  v_all <- v %>% full_join(v3, by = "outcome")
+  
+  options(knitr.kable.NA = '-')
+  
+  kable(
+    v_all[, c("outcome",
+              "effect.x",
+              "CI.x",
+              "p_value.x",
+              "effect.y",
+              "CI.y",
+              "p_value.y")],
+    format = "html",
+    booktabs = T,
+    escape = F,
+    row.names = F,
+    digits = 3
+    ,
+    caption =  paste(
+      "Cox regression model for outcome `Recurrent AF during first year` and `",
+      biomarkers[i],
+      "`",
+      sep = ""
+    )
+    ,
+    col.names = c(
+      "Variable",
+      "HR per SD",
+      "95%-CI",
+      "p value",
+      "HR per SD",
+      "95%-CI",
+      "p value"
+    )
+  ) %>%
+    kable_styling(full_width = F) %>%
+    footnote(general = c("Site was included as shared frailty term")) %>%
+    add_header_above(c(
+      "",
+      "Model 1" = 3,
+      "Model 2 - with interaction" = 3
+    )) %>%
+    column_spec (4, border_left = F, border_right = T)
+  
+}
+
+plot_res(1)
+plot_res(2)
+plot_res(3)
+plot_res(4)
+plot_res(5)
+plot_res(6)
+plot_res(7)
+plot_res(8)
+plot_res(9)
+plot_res(10)
+plot_res(11)
+plot_res(12)
+plot_res(13)
+plot_res(14)
+
+```
+
+## Outcome: RecAF at 24 months
+
+
+```{r Sinus Rhythm FU24 indivi BM FUNC, results='asis'}
+# sex, age, BMI, diastolic blood pressure, AF pattern (first-episode, paroxysmal, persistent), left ventricular ejection fraction, rhythm at baseline, and randomized group (usual care or early rhythm control)
+
+patient_characteristics_endpoints_b$Random_group <- as.factor(patient_characteristics_endpoints_b$Random_group) %>% relevel(ref =
+                                                                                                                              "Usual care")
+
+## function to call model regression
+plot_res <- function(i) {
+  formula_main_effect <- as.formula(
+    paste(
+      "Surv(time_to_recurrent_af_2y, status_recurrent_af_2y) ~ ",
+      biomarkers_wins_log_std[i],
+      " + Random_group + Gender + scale(i_age_calc) + scale(i_bmi) + scale(Diastolic_blood_pressure) + Rhythm_at_baseline + i_af_type + scale(lvef_baseline) + frailty(cid) "
+    )
+  )
+  formula_biomarker_group_interaction <- as.formula(
+    paste(
+      "Surv(time_to_recurrent_af_2y, status_recurrent_af_2y) ~ ",
+      biomarkers_wins_log_std[i],
+      " * Random_group + Gender + scale(i_age_calc) + scale(i_bmi) + scale(Diastolic_blood_pressure)  + Rhythm_at_baseline + i_af_type + scale(lvef_baseline) + frailty(cid)  "
+    )
+  )
+  
+  fit1 <- coxph(formula_main_effect , data = patient_characteristics_endpoints_b)
+  fit2 <- coxph(formula_biomarker_group_interaction , data = patient_characteristics_endpoints_b)
+  
+  v <- cbind(
+    effect = round(exp(coef(fit1)), 2)
+    ,
+    CI = paste("[", round(exp(
+      confint(fit1, level = 0.95)
+    )[, 1], 2), ", ", round(exp(
+      confint(fit1, level = 0.95)
+    )[, 2], 2), "]")
+    ,
+    p_value = round(summary(fit1)$coefficients[-11, "p"], 3)
+  ) %>% as.data.frame()
+  v$p_value <- ifelse(as.numeric(as.character(v$p_value)) < 0.05,
+                      paste("**", v$p_value , "**", sep = ""),
+                      v$p_value)
+  v$p_value <- ifelse(v$p_value == "**0**", "**< 0.001**", v$p_value)
+  v$outcome <- c(
+    biomarkers_wins_log_std[i],
+    "Random_group: ERC",
+    "Gender: Male",
+    "Age",
+    "BMI",
+    "Diastolic blood pressure",
+    "Rhythm at baseline: SR",
+    "AF type: Paroxysmal (ref = first-episode)",
+    "AF type: Persistent (ref = first-episode)",
+    "LVEF"
+  )
+  
+  v3 <- cbind(
+    effect = round(exp(coef(fit2)), 2)
+    ,
+    CI = paste("[", round(exp(
+      confint(fit2, level = 0.95)
+    )[, 1], 2), ", ", round(exp(
+      confint(fit2, level = 0.95)
+    )[, 2], 2), "]")
+    ,
+    p_value = round(summary(fit2)$coefficients[-11, "p"], 3)
+  ) %>% as.data.frame()
+  
+  
+  v3$p_value <- ifelse(as.numeric(as.character(v3$p_value)) < 0.05,
+                       paste("**", v3$p_value , "**", sep = ""),
+                       v3$p_value)
+  v3$p_value <- ifelse(v3$p_value == "**0**", "**< 0.001**", v3$p_value)
+  
+  v3$outcome <- c(
+    biomarkers_wins_log_std[i],
+    "Random_group: ERC",
+    "Gender: Male",
+    "Age",
+    "BMI",
+    "Diastolic blood pressure",
+    "Rhythm at baseline: SR",
+    "AF type: Paroxysmal (ref = first-episode)",
+    "AF type: Persistent (ref = first-episode)",
+    "LVEF",
+    paste(biomarkers_wins_log_std[i], ":Random group")
+  )
+  
+  v_all <- v %>% full_join(v3, by = "outcome")
+  
+  options(knitr.kable.NA = '-')
+  
+  kable(
+    v_all[, c("outcome",
+              "effect.x",
+              "CI.x",
+              "p_value.x",
+              "effect.y",
+              "CI.y",
+              "p_value.y")],
+    format = "html",
+    booktabs = T,
+    escape = F,
+    row.names = F,
+    digits = 3
+    ,
+    caption =  paste(
+      "Cox regression model for outcome `Recurrent AF during first 24 months` and `",
+      biomarkers[i],
+      "`",
+      sep = ""
+    )
+    ,
+    col.names = c(
+      "Variable",
+      "HR per SD",
+      "95%-CI",
+      "p value",
+      "HR per SD",
+      "95%-CI",
+      "p value"
+    )
+  ) %>%
+    kable_styling(full_width = F) %>%
+    footnote(general = c("Site was included as shared frailty term")) %>%
+    add_header_above(c(
+      "",
+      "Model 1" = 3,
+      "Model 2 - with interaction" = 3
+    )) %>%
+    column_spec (4, border_left = F, border_right = T)
+  
+  
+}
+
+plot_res(1)
+plot_res(2)
+plot_res(3)
+plot_res(4)
+plot_res(5)
+plot_res(6)
+plot_res(7)
+plot_res(8)
+plot_res(9)
+plot_res(10)
+plot_res(11)
+plot_res(12)
+plot_res(13)
+plot_res(14)
+```
+
+

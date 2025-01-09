@@ -1,0 +1,748 @@
+---
+title: "EAST Biomarker Clustering SR REVIEW"
+author:
+  - name: "Katrin Borof"
+    email: k.borof@uke.de
+    affiliation: Universitäres Herz- und Gefäßzentrum UKE Hamburg, Klinik für Kardiologie <br> Universitätsklinikum Hamburg-Eppendorf
+
+date: " `r  invisible(Sys.setlocale('LC_TIME', 'English'))` `r  format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    number_section: true
+---
+
+```{r setup, eval=T, echo=F, include=FALSE}
+
+knitr::opts_chunk$set(echo = F)
+
+# load packages #
+library(ggplot2)
+library(tidyverse)
+library(summarytools)
+library(haven)
+library(tableone)
+library(lme4)
+library(lmerTest)
+library(knitr)
+library(kableExtra)
+library(gtools)
+library(VIM)
+library(jtools)
+library(lubridate)
+library(gtsummary)
+library(gt)
+library(broom.helpers)
+library(naniar)
+library(mice)
+library(survival)
+library(survminer)
+library(sjPlot)
+library(rms)
+library(RVenn)
+library(ranger)
+library(caret)
+library(ClustOfVar)
+library(broom.mixed)
+library(lsmeans)
+library(ordinal)
+library(mitml)
+library(car)
+library(cutpointr)
+```
+
+```{r import data sets }
+# Biomarkers raw, wins_log_std, and Cluster groups
+EAST_biomarker_cluster <- read.csv(
+  "../DATA/input/sinus_rhythm_xy_polca.csv",
+  sep = ',',
+  check.names = T,
+  stringsAsFactors = T
+)
+
+# extra vector for names of biomarkers; raw and transformed
+biomarkers <- c(
+  'IL6',
+  'NtproBNP',
+  'TnT',
+  'GDF15',
+  'CRP',
+  'DDimer',
+  'CA125',
+  'ANGPT2',
+  'BMP10',
+  'ESM1',
+  'FABP3',
+  'FGF23',
+  'IGFBP7',
+  'sCr'
+)
+
+biomarkers_wins_log <- c(
+  'IL6_wins_log',
+  'NtproBNP_wins_log',
+  'TnT_wins_log',
+  'GDF15_wins_log',
+  'CRP_wins_log',
+  'DDimer_wins_log',
+  'CA125_wins_log',
+  'ANGPT2_wins_log',
+  'BMP10_wins_log',
+  'ESM1_wins_log',
+  'FABP3_wins_log',
+  'FGF23_wins_log',
+  'IGFBP7_wins_log',
+  'sCr_wins_log'
+)
+
+biomarkers_wins_log_std <- c(
+  'IL6_wins_log_std',
+  'NtproBNP_wins_log_std',
+  'TnT_wins_log_std',
+  'GDF15_wins_log_std',
+  'CRP_wins_log_std',
+  'DDimer_wins_log_std',
+  'CA125_wins_log_std',
+  'ANGPT2_wins_log_std',
+  'BMP10_wins_log_std',
+  'ESM1_wins_log_std',
+  'FABP3_wins_log_std',
+  'FGF23_wins_log_std',
+  'IGFBP7_wins_log_std',
+  'sCr_wins_log_std'
+)
+
+# Import clinical data
+patient_characteristics_endpoints_b <- read_dta("../DATA/input/patient_characteristics_endpoints_b.dta")
+# ad clustering and Biomarkers
+patient_characteristics_endpoints_b <- patient_characteristics_endpoints_b %>%
+  left_join(
+    EAST_biomarker_cluster %>% select(
+      subjectnr,
+      PoLCA_cluster,
+      all_of(biomarkers),
+      all_of(biomarkers_wins_log),
+      all_of(biomarkers_wins_log_std)
+    ),
+    by = "subjectnr"
+  )
+
+patient_chara_endpoints_visit_b <- read_dta("../DATA/input/patient_characteristics_endpoints_visit_data_b.dta") %>% filter(visitname ==
+                                                                                                                            "Baseline")
+
+# join baseline data to endpoint dataframe
+patient_characteristics_endpoints_b <- patient_characteristics_endpoints_b %>% left_join(
+  patient_chara_endpoints_visit_b %>%  select(subjectnr, i_age_calc, i_gender, i_bmi, i_rr_dia, i_af_type)
+  ,
+  by = "subjectnr"
+)
+# create new Random_group variable with pretty names
+patient_characteristics_endpoints_b <- patient_characteristics_endpoints_b %>% mutate(
+  Random_group = case_when(
+    i_random == 1 ~ "Early rhythm control",
+    i_random == 2 ~ "Usual care",
+    TRUE ~ NA_character_
+  )
+  ,
+  Rhythm_at_baseline = case_when(
+    heart_rhythm_bl == 0 ~ "Others",
+    heart_rhythm_bl == 1 ~ "Sinus rhythm + Pacing"
+  )
+  ,
+  Rhythm_at_12_months_follow_up	 = case_when(
+    heart_rhythm_fu12 == 0 ~ "Others",
+    heart_rhythm_fu12 == 1 ~ "Sinus rhythm + Pacing"
+  )
+  ,
+  Rhythm_at_24_months_follow_up	 = case_when(
+    heart_rhythm_fu24 == 0 ~ "Others",
+    heart_rhythm_fu24 == 1 ~ "Sinus rhythm + Pacing"
+  )
+  ,
+  Gender = case_when(i_gender == 1 ~ "Male", i_gender == 2 ~ "Female", TRUE ~ NA_character_)
+  ,
+  Diastolic_blood_pressure = i_rr_dia
+)
+```
+
+# NTproBNP
+
+```{r, message=F, warning=F}
+tbl_summary(
+  patient_characteristics_endpoints_b %>% select(heart_rhythm_fu12
+                                                 , NtproBNP, NtproBNP_wins_log) %>% mutate(heart_rhythm_fu12 = as.factor(heart_rhythm_fu12) %>% relevel(ref =
+                                                                                                                                                          "1"))
+  ,
+  by = "heart_rhythm_fu12"
+  ,
+  statistic = all_continuous2() ~ c(
+    "{mean} ({sd})",
+    "{median} ({p25}, {p75})",
+    "{median} ({p5}, {p95})"#, "{median} ({p2}, {p98})"
+    ,
+    "{median} ({p20},{p80})"
+  )
+  ,
+  type = list(NtproBNP ~ 'continuous2', NtproBNP_wins_log ~ 'continuous2')
+  
+) %>%
+  #modify_header( all_stat_cols() ~ "**{level}** <br> N = {n} ({style_percent(p)}%)") %>%
+  modify_header(
+    label ~ "",
+    stat_2 ~ "**Others**,<br>N = {n}  ({style_percent(p)}%)",
+    stat_1 ~ "**Sinus rhythm + Pacing**,<br>N = {n}  ({style_percent(p)}%)"
+  ) %>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Heart Rhythm at FU12 months**")
+```
+
+
+```{r, fig.width=10, fig.height = 5, message=F, warning=F}
+new <- c("Others at FU12", "Sinus rhythm + Pacing at FU12")
+names(new) <- c("0", "1")
+
+gridExtra::grid.arrange(
+  ggplot(
+    patient_characteristics_endpoints_b %>% filter(!is.na(heart_rhythm_fu12)),
+    aes(NtproBNP, x = "")
+  ) +
+    geom_boxplot() +
+    facet_grid( ~ heart_rhythm_fu12, labeller = labeller(heart_rhythm_fu12 = new)) +
+    #  labs( x ="Heart rhythm at Baseline") +
+    coord_cartesian(y = c(0, 5000))
+  ,
+  ggplot(
+    patient_characteristics_endpoints_b %>% filter(!is.na(heart_rhythm_fu12)),
+    aes(NtproBNP_wins_log, x = "")
+  ) +
+    geom_boxplot() +
+    facet_grid( ~ heart_rhythm_fu12, labeller = labeller(heart_rhythm_fu12 = new)) +
+    labs(x = NULL) +
+    coord_cartesian(y = c(0, 10))
+  ,
+  nrow = 1
+)
+
+
+gridExtra::grid.arrange(
+  ggplot(
+    patient_characteristics_endpoints_b %>% filter(!is.na(heart_rhythm_fu12)),
+    aes(NtproBNP, x = as.character(heart_rhythm_bl))
+  ) +
+    geom_boxplot() +
+    facet_grid( ~ heart_rhythm_fu12, labeller = labeller(heart_rhythm_fu12 = new)) +
+    labs(x = "Heart rhythm at Baseline") +
+    coord_cartesian(y = c(0, 5000)) +
+    scale_x_discrete(labels = c("Others", "Sinus rhythm + Pacing"))
+  ,
+  ggplot(
+    patient_characteristics_endpoints_b %>% filter(!is.na(heart_rhythm_fu12)),
+    aes(NtproBNP_wins_log, x = as.character(heart_rhythm_bl))
+  ) +
+    geom_boxplot() +
+    facet_grid( ~ heart_rhythm_fu12, labeller = labeller(heart_rhythm_fu12 = new)) +
+    labs(x = "Heart rhythm at Baseline") +
+    coord_cartesian(y = c(0, 10)) +
+    scale_x_discrete(labels = c("Others", "Sinus rhythm + Pacing"))
+  ,
+  nrow = 1
+)
+```
+
+
+
+## Determine optimal cutpoint
+
+Calculation of optimal cutpoints in binary classification tasks with method "Maximize the Youden-Index" with 1000 bootstrap samples.
+
+```{r, message=F, warning=F}
+sub <- patient_characteristics_endpoints_b %>% filter(!is.na(NtproBNP))
+suby <- sub %>% filter(!is.na(heart_rhythm_fu12))
+suby <- suby %>% mutate(
+  Heart_rhythm_FU12 = case_when(
+    heart_rhythm_fu12 == 0 ~ "Sinus rhythm",
+    heart_rhythm_fu12 == 1 ~ "AF"
+  )
+)
+## data, x , outcome
+cp1 <- cutpointr(suby,
+                 NtproBNP ,
+                 Heart_rhythm_FU12
+                 ,
+                 metric = youden
+                 ,
+                 boot_runs = 1000)
+
+cp <- cutpointr(
+  suby,
+  NtproBNP_wins_log ,
+  Heart_rhythm_FU12
+  ,
+  metric = youden
+  ,
+  boot_runs = 1000
+)
+
+plot(cp1)
+
+cp_res <- cp1 %>% select(predictor, optimal_cutpoint, acc, sensitivity, specificity) %>% rbind(cp %>% select(predictor, optimal_cutpoint, acc, sensitivity, specificity))
+cp_res$metric <- "youden"
+cp_res$predictor <- c("NT-proBNP", "NT-proBNP (winsorized & log. transformed)")
+
+kable(
+  cp_res
+  ,
+  format = "html",
+  digits = 3,
+  col.names = c(
+    "Predictors",
+    "Optimal Cutpoint",
+    "Accuracy",
+    "Sensitivity",
+    "Specificity",
+    "Metric"
+  )
+) %>%
+  kable_styling(full_width = F)
+```
+## Change in Percent per cut-off
+
+```{r, eval=T  , message=F, warning=F}
+sub <- sub %>% mutate(
+  NT.proBNP_below_500 = case_when(NtproBNP < 500 ~ "Yes" , T ~ "No"),
+  NT.proBNP_below_1000 = case_when(NtproBNP < 1000 ~ "Yes" , T ~ "No"),
+  NT.proBNP_above_1000 = case_when(NtproBNP > 1000 ~ "Yes" , T ~ "No"),
+  NT.proBNP_above_1500 = case_when(NtproBNP > 1500 ~ "Yes" , T ~ "No")
+  ,
+  NT.proBNP_above_2000 = case_when(NtproBNP > 2000 ~ "Yes" , T ~ "No")
+)
+res <- tbl_summary(
+  sub %>% select(
+    heart_rhythm_fu12
+    ,
+    NT.proBNP_below_500,
+    NT.proBNP_below_1000,
+    NT.proBNP_above_1500,
+    NT.proBNP_above_2000
+    
+    
+  )
+  ,
+  by = "heart_rhythm_fu12"
+  ,
+  percent = "row"
+  ,
+  digits = list(all_categorical() ~ c(0, 2))
+) %>%
+  add_n() %>%
+  modify_header(
+    label ~ "",
+    stat_1 ~ "**Others**,<br>N = {n}  ({style_percent(p)}%)",
+    stat_2 ~ "**Sinus rhythm + Pacing**,<br>N = {n}  ({style_percent(p)}%)"
+  ) %>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Heart Rhythm at FU12 months**")
+
+res$table_body$n <- c(
+  sum(
+    sub$NT.proBNP_below_500 == "Yes" & !is.na(sub$heart_rhythm_fu12)
+  ),
+  sum(
+    sub$NT.proBNP_below_1000 == "Yes" & !is.na(sub$heart_rhythm_fu12)
+  ),
+  sum(
+    sub$NT.proBNP_above_1500 == "Yes" & !is.na(sub$heart_rhythm_fu12)
+  ),
+  sum(
+    sub$NT.proBNP_above_2000 == "Yes" & !is.na(sub$heart_rhythm_fu12)
+  )
+  
+)
+
+res$table_body$label <- gsub("_below_", " < ", res$table_body$label)
+res$table_body$label <- gsub("_above_", " > ", res$table_body$label)
+
+res
+```
+
+# BMP10
+
+```{r, message=F, warning=F}
+sub <- patient_characteristics_endpoints_b %>% filter(!is.na(NtproBNP))
+
+tbl_summary(
+  sub %>% select(heart_rhythm_fu12, BMP10, BMP10_wins_log) %>% mutate(heart_rhythm_fu12 = as.factor(heart_rhythm_fu12) %>% relevel(ref =
+                                                                                                                                     "1"))
+  ,
+  by = "heart_rhythm_fu12"
+  ,
+  statistic = all_continuous2() ~ c(
+    "{mean} ({sd})",
+    "{median} ({p25}, {p75})",
+    "{median} ({p5}, {p95})"#, "{median} ({p2}, {p98})"
+    ,
+    "{median} ({p20},{p80})"
+  )
+  ,
+  type = list(BMP10 ~ 'continuous2', BMP10_wins_log ~ 'continuous2')
+  
+) %>%
+  #modify_header( all_stat_cols() ~ "**{level}** <br> N = {n} ({style_percent(p)}%)") %>%
+  modify_header(
+    label ~ "",
+    stat_2 ~ "**Others**,<br>N = {n}  ({style_percent(p)}%)",
+    stat_1 ~ "**Sinus rhythm + Pacing**,<br>N = {n}  ({style_percent(p)}%)"
+  ) %>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Heart Rhythm at FU12 months**")
+```
+
+```{r, fig.width=10, fig.height = 5, message=F, warning=F}
+new <- c("Others at FU12", "Sinus rhythm + Pacing at FU12")
+names(new) <- c("0", "1")
+
+gridExtra::grid.arrange(
+  ggplot(sub %>% filter(!is.na(heart_rhythm_fu12)), aes(BMP10 , x = "")) +
+    geom_boxplot() +
+    facet_grid( ~ heart_rhythm_fu12, labeller = labeller(heart_rhythm_fu12 = new)) +
+    #  labs( x ="Heart rhythm at Baseline") +
+    coord_cartesian(y = c(0, 5))
+  ,
+  ggplot(sub %>% filter(!is.na(heart_rhythm_fu12)), aes(BMP10_wins_log, x =
+                                                          "")) +
+    geom_boxplot() +
+    facet_grid( ~ heart_rhythm_fu12, labeller = labeller(heart_rhythm_fu12 = new)) +
+    labs(x = NULL) +
+    coord_cartesian(y = c(0, 2.5))
+  ,
+  nrow = 1
+)
+
+
+gridExtra::grid.arrange(
+  ggplot(sub %>% filter(!is.na(heart_rhythm_fu12)), aes(BMP10, x = as.character(heart_rhythm_bl))) +
+    geom_boxplot() +
+    facet_grid( ~ heart_rhythm_fu12, labeller = labeller(heart_rhythm_fu12 = new)) +
+    labs(x = "Heart rhythm at Baseline") +
+    coord_cartesian(y = c(0, 5)) +
+    scale_x_discrete(labels = c("Others", "Sinus rhythm + Pacing"))
+  ,
+  ggplot(sub %>% filter(!is.na(heart_rhythm_fu12)), aes(BMP10_wins_log, x = as.character(heart_rhythm_bl))) +
+    geom_boxplot() +
+    facet_grid( ~ heart_rhythm_fu12, labeller = labeller(heart_rhythm_fu12 = new)) +
+    labs(x = "Heart rhythm at Baseline") +
+    coord_cartesian(y = c(0, 2.5)) +
+    scale_x_discrete(labels = c("Others", "Sinus rhythm + Pacing"))
+  ,
+  nrow = 1
+)
+```
+
+
+## Determine optimal cutpoint
+
+Calculation of optimal cutpoints in binary classification tasks with method "Maximize the Youden-Index after kernel smoothing the distributions of the two classes" with 1000 bootstrap samples.
+
+
+```{r, eval=T, message=F, warning=F}
+suby <- sub %>% filter(!is.na(heart_rhythm_fu12))
+
+suby <- suby %>% mutate(
+  Heart_rhythm_FU12 = case_when(
+    heart_rhythm_fu12 == 0 ~ "Sinus rhythm",
+    heart_rhythm_fu12 == 1 ~ "AF"
+  )
+)
+## data, x , outcome
+cp1 <- cutpointr(suby,
+                 BMP10 ,
+                 Heart_rhythm_FU12
+                 ,
+                 metric = youden
+                 ,
+                 boot_runs = 1000)
+
+cp <- cutpointr(suby,
+                BMP10_wins_log ,
+                Heart_rhythm_FU12
+                ,
+                metric = youden
+                ,
+                boot_runs = 1000)
+
+plot(cp1)
+
+cp_res <- cp1 %>% select(predictor, optimal_cutpoint, acc, sensitivity, specificity) %>% rbind(cp %>% select(predictor, optimal_cutpoint, acc, sensitivity, specificity))
+cp_res$metric <- "youden"
+cp_res$predictor <- c("BMP10", "BMP10 (winsorized & log. transformed)")
+
+kable(
+  cp_res ,
+  fotmat = "html",
+  digits = 3,
+  col.names = c(
+    "Predictors",
+    "Optimal Cutpoint",
+    "Accuracy",
+    "Sensitivity",
+    "Specificity",
+    "Metric"
+  )
+) %>%
+  kable_styling(full_width = F)
+```
+
+
+
+## Change in Percent per cut-off
+
+```{r, eval=T  , message=F, warning=F}
+sub <- sub %>% mutate(
+  BMP10_below_1.5 = case_when(BMP10 < 1.5 ~ "Yes" , T ~ "No"),
+  BMP10_below_2 = case_when(BMP10 < 2 ~ "Yes" , T ~ "No"),
+  BMP10_above_2.5 = case_when(BMP10 > 2.5 ~ "Yes" , T ~ "No"),
+  BMP10_above_3 = case_when(BMP10 > 3 ~ "Yes" , T ~ "No")
+  ,
+  BMP10_above_3.5 = case_when(BMP10 > 3.5 ~ "Yes" , T ~ "No")
+  
+  
+)
+res <- tbl_summary(
+  sub %>% select(
+    heart_rhythm_fu12
+    ,
+    BMP10_below_1.5,
+    BMP10_below_2,
+    BMP10_above_2.5,
+    BMP10_above_3
+    
+    
+  )
+  ,
+  by = "heart_rhythm_fu12"
+  ,
+  percent = "row"
+  ,
+  digits = list(all_categorical() ~ c(0, 2))
+) %>%
+  add_n() %>%
+  modify_header(
+    label ~ "",
+    stat_1 ~ "**Others**,<br>N = {n}  ({style_percent(p)}%)",
+    stat_2 ~ "**Sinus rhythm + Pacing**,<br>N = {n}  ({style_percent(p)}%)"
+  ) %>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Heart Rhythm at FU12 months**")
+
+
+res$table_body$n <- c(
+  sum(sub$BMP10_below_1.5 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$BMP10_below_2 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$BMP10_above_2.5 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$BMP10_above_3 == "Yes" & !is.na(sub$heart_rhythm_fu12))
+  
+)
+
+res$table_body$label <- gsub("_below_", " < ", res$table_body$label)
+res$table_body$label <- gsub("_above_", " > ", res$table_body$label)
+res
+```
+
+# ANGPT2
+
+```{r, message=F, warning=F}
+sub <- patient_characteristics_endpoints_b %>% filter(!is.na(NtproBNP))
+
+tbl_summary(
+  sub %>% select(heart_rhythm_fu12
+                 , ANGPT2, ANGPT2_wins_log) %>% mutate(heart_rhythm_fu12 = as.factor(heart_rhythm_fu12) %>% relevel(ref =
+                                                                                                                      "1"))
+  ,
+  by = "heart_rhythm_fu12"
+  ,
+  statistic = all_continuous2() ~ c(
+    "{mean} ({sd})",
+    "{median} ({p25}, {p75})",
+    "{median} ({p5}, {p95})"#, "{median} ({p2}, {p98})"
+    ,
+    "{median} ({p20},{p80})"
+  )
+  ,
+  type = list(ANGPT2 ~ 'continuous2', ANGPT2_wins_log ~ 'continuous2')
+  
+) %>%
+  modify_header(
+    label ~ "",
+    stat_2 ~ "**Others**,<br>N = {n}  ({style_percent(p)}%)",
+    stat_1 ~ "**Sinus rhythm + Pacing**,<br>N = {n}  ({style_percent(p)}%)"
+  ) %>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Heart Rhythm at FU12 months**")
+```
+
+
+```{r, fig.width=10, fig.height = 5, message=F, warning=F}
+new <- c("Others at FU12", "Sinus rhythm + Pacing at FU12")
+names(new) <- c("0", "1")
+
+gridExtra::grid.arrange(
+  ggplot(sub %>% filter(!is.na(heart_rhythm_fu12)), aes(ANGPT2, x = "")) +
+    geom_boxplot() +
+    facet_grid( ~ heart_rhythm_fu12, labeller = labeller(heart_rhythm_fu12 = new)) +
+    coord_cartesian(y = c(0, 20))
+  ,
+  ggplot(sub %>% filter(!is.na(heart_rhythm_fu12)), aes(ANGPT2_wins_log, x =
+                                                          "")) +
+    geom_boxplot() +
+    facet_grid( ~ heart_rhythm_fu12, labeller = labeller(heart_rhythm_fu12 = new)) +
+    labs(x = NULL) +
+    coord_cartesian(y = c(-2, 5))
+  ,
+  nrow = 1
+)
+
+
+gridExtra::grid.arrange(
+  ggplot(sub %>% filter(!is.na(heart_rhythm_fu12)), aes(ANGPT2, x = as.character(heart_rhythm_bl))) +
+    geom_boxplot() +
+    facet_grid( ~ heart_rhythm_fu12, labeller = labeller(heart_rhythm_fu12 = new)) +
+    labs(x = "Heart rhythm at Baseline") +
+    coord_cartesian(y = c(0, 20)) +
+    scale_x_discrete(labels = c("Others", "Sinus rhythm + Pacing"))
+  ,
+  ggplot(sub %>% filter(!is.na(heart_rhythm_fu12)), aes(ANGPT2_wins_log, x = as.character(heart_rhythm_bl))) +
+    geom_boxplot() +
+    facet_grid( ~ heart_rhythm_fu12, labeller = labeller(heart_rhythm_fu12 = new)) +
+    labs(x = "Heart rhythm at Baseline") +
+    coord_cartesian(y = c(-2, 5)) +
+    scale_x_discrete(labels = c("Others", "Sinus rhythm + Pacing"))
+  ,
+  nrow = 1
+)
+```
+
+## Determine optimal cutpoint
+
+Calculation of optimal cutpoints in binary classification tasks with method "Maximize the Youden-Index after kernel smoothing the distributions of the two classes" with 1000 bootstrap samples.
+
+```{r, message=F, warning=F}
+suby <- sub %>% filter(!is.na(heart_rhythm_fu12))
+suby <- suby %>% mutate(
+  Heart_rhythm_FU12 = case_when(
+    heart_rhythm_fu12 == 0 ~ "Sinus rhythm",
+    heart_rhythm_fu12 == 1 ~ "AF"
+  )
+)
+
+## data, x , outcome
+cp1 <- cutpointr(suby,
+                 ANGPT2 ,
+                 Heart_rhythm_FU12
+                 ,
+                 metric = youden
+                 ,
+                 boot_runs = 1000)
+
+cp <- cutpointr(suby,
+                ANGPT2_wins_log ,
+                Heart_rhythm_FU12
+                ,
+                metric = youden
+                ,
+                boot_runs = 1000)
+
+plot(cp1)
+
+cp_res <- cp1 %>% select(predictor, optimal_cutpoint, acc, sensitivity, specificity) %>% rbind(cp %>% select(predictor, optimal_cutpoint, acc, sensitivity, specificity))
+cp_res$metric <- "youden"
+cp_res$predictor <- c("ANGPT2", "ANGPT2 (winsorized & log. transformed)")
+
+kable(
+  cp_res ,
+  fotmat = "html",
+  digits = 3,
+  col.names = c(
+    "Predictors",
+    "Optimal Cutpoint",
+    "Accuracy",
+    "Sensitivity",
+    "Specificity",
+    "Metric"
+  )
+) %>%
+  kable_styling(full_width = F)
+
+```
+
+## Change in Percent per cut-off
+
+```{r, eval=T  , message=F, warning=F}
+
+sub <- sub %>% mutate(
+  ANGPT2_below_1.5 = case_when(ANGPT2 < 1.5 ~ "Yes" , T ~ "No"),
+  ANGPT2_below_2 = case_when(ANGPT2 < 2 ~ "Yes" , T ~ "No"),
+  ANGPT2_below_2.3 = case_when(ANGPT2 < 2.3 ~ "Yes" , T ~ "No"),
+  ANGPT2_below_2.5 = case_when(ANGPT2 < 2.5 ~ "Yes" , T ~ "No"),
+  ANGPT2_below_3 = case_when(ANGPT2 < 3 ~ "Yes" , T ~ "No"),
+  ANGPT2_below_3.5 = case_when(ANGPT2 < 3.5 ~ "Yes" , T ~ "No"),
+  ANGPT2_above_2.3 = case_when(ANGPT2 > 2.3 ~ "Yes" , T ~ "No"),
+  ANGPT2_above_2.5 = case_when(ANGPT2 > 2.5 ~ "Yes" , T ~ "No"),
+  ANGPT2_above_3 = case_when(ANGPT2 > 3 ~ "Yes" , T ~ "No")
+  ,
+  ANGPT2_above_3.5 = case_when(ANGPT2 > 3.5 ~ "Yes" , T ~ "No")
+  ,
+  ANGPT2_above_4 = case_when(ANGPT2 > 4 ~ "Yes" , T ~ "No")
+)
+res <- tbl_summary(
+  sub %>% select(
+    heart_rhythm_fu12
+    ,
+    ANGPT2_below_1.5,
+    ANGPT2_below_2,
+    ANGPT2_below_2.3,
+    ANGPT2_below_2.5,
+    ANGPT2_below_3,
+    ANGPT2_below_3.5
+    ,
+    ANGPT2_above_2.3,
+    ANGPT2_above_2.5,
+    ANGPT2_above_3,
+    ANGPT2_above_3.5,
+    ANGPT2_above_4
+    
+    
+  )
+  ,
+  by = "heart_rhythm_fu12"
+  ,
+  percent = "row"
+  ,
+  digits = list(all_categorical() ~ c(0, 2))
+) %>%
+  add_n() %>%
+  modify_header(
+    label ~ "",
+    stat_1 ~ "**Others**,<br>N = {n}  ({style_percent(p)}%)",
+    stat_2 ~ "**Sinus rhythm + Pacing**,<br>N = {n}  ({style_percent(p)}%)"
+  ) %>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Heart Rhythm at FU12 months**")
+
+
+res$table_body$n <- c(
+  sum(sub$ANGPT2_below_1.5 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$ANGPT2_below_2 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$ANGPT2_below_2.3 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$ANGPT2_below_2.5 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$ANGPT2_below_3 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$ANGPT2_below_3.5 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$ANGPT2_above_2.3 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$ANGPT2_above_2.5 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$ANGPT2_above_3 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$ANGPT2_above_3.5 == "Yes" & !is.na(sub$heart_rhythm_fu12)),
+  sum(sub$ANGPT2_above_4 == "Yes" & !is.na(sub$heart_rhythm_fu12))
+  
+)
+
+res$table_body$label <- gsub("_below_", " < ", res$table_body$label)
+res$table_body$label <- gsub("_above_", " > ", res$table_body$label)
+
+res
+```
+# end

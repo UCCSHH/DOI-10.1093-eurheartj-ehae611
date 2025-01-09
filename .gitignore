@@ -1,0 +1,10 @@
+# ignore all dataset files
+*.csv
+*.rds
+*.dta
+
+# Ignore log files
+*.log
+
+# ignore all back-up files
+*.bak
